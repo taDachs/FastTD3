@@ -18,6 +18,8 @@ class Policy(nn.Module):
         super().__init__()
 
         self.args = args
+        self.n_obs = n_obs
+        self.n_act = n_act
 
         num_envs = args["num_envs"]
         init_scale = args["init_scale"]

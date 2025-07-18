@@ -175,6 +175,7 @@ def get_args():
         "Isaac-Velocity-Rough-G1-v0": IsaacVelocityRoughG1Args,
         "Isaac-Repose-Cube-Allegro-Direct-v0": IsaacReposeCubeAllegroDirectArgs,
         "Isaac-Repose-Cube-Shadow-Direct-v0": IsaacReposeCubeShadowDirectArgs,
+        "Unitree-Go2-Velocity": UnitreeGo2VelocityArgs,
         # MTBench
         "MTBench-meta-world-v2-mt10": MetaWorldMT10Args,
         "MTBench-meta-world-v2-mt50": MetaWorldMT50Args,
@@ -189,7 +190,7 @@ def get_args():
     if base_args.env_name.startswith("h1hand-") or base_args.env_name.startswith("h1-"):
         # HumanoidBench
         specific_args = tyro.cli(HumanoidBenchArgs)
-    elif base_args.env_name.startswith("Isaac-"):
+    elif base_args.env_name.startswith("Isaac-") or base_args.env_name.startswith("Unitree-"):
         # IsaacLab
         specific_args = tyro.cli(IsaacLabArgs)
     elif base_args.env_name.startswith("MTBench-"):
@@ -519,3 +520,19 @@ class IsaacReposeCubeShadowDirectArgs(IsaacLabArgs):
     total_timesteps: int = 100000
     v_min: float = -500.0
     v_max: float = 500.0
+
+@dataclass
+class UnitreeGo2VelocityArgs(IsaacLabArgs):
+    env_name: str = "Unitree-Go2-Velocity"
+    num_steps: int = 8
+    num_updates: int = 4
+    total_timesteps: int = 50000
+    # my adjustments:
+    gamma: float = 0.97
+    std_min: float = 0.2
+    std_max: float = 0.8
+    policy_noise: float = 0.2
+
+    action_bounds = 1.0
+
+    buffer_size: int = 1024 * 5  # To reduce memory usage

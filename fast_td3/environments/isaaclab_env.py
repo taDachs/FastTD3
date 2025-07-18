@@ -21,6 +21,7 @@ class IsaacLabEnv:
         simulation_app = app_launcher.app
 
         import isaaclab_tasks
+        import unitree_rl_lab.tasks  # noqa: F401
         from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
         env_cfg = parse_env_cfg(
@@ -68,6 +69,7 @@ class IsaacLabEnv:
         obs = obs_dict["policy"]
         critic_obs = obs_dict["critic"] if self.asymmetric_obs else None
         info_ret = {"time_outs": truncations, "observations": {"critic": critic_obs}}
+        info_ret["isaaclab"] = infos
         # NOTE: There's really no way to get the raw observations from IsaacLab
         # We just use the 'reset_obs' as next_obs, unfortunately.
         # See https://github.com/isaac-sim/IsaacLab/issues/1362
