@@ -160,6 +160,7 @@ class HyperTanhPolicy(nn.Module):
         action_dim: int,
         scaler_init: float,
         scaler_scale: float,
+        squash: bool = True,
         device: torch.device = None,
     ):
         super().__init__()
@@ -167,13 +168,15 @@ class HyperTanhPolicy(nn.Module):
         self.mean_scaler = Scaler(hidden_dim, scaler_init, scaler_scale, device=device)
         self.mean_w2 = HyperDense(hidden_dim, action_dim, device=device)
         self.mean_bias = nn.Parameter(torch.zeros(action_dim, device=device))
+        self.squash = squash
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Mean path
         mean = self.mean_w1(x)
         mean = self.mean_scaler(mean)
         mean = self.mean_w2(mean) + self.mean_bias.to(mean.dtype)
-        mean = torch.tanh(mean)
+        if self.squash:
+            mean = torch.tanh(mean)
         return mean
 
 
@@ -422,6 +425,8 @@ class Actor(nn.Module):
         num_blocks: int,
         std_min: float = 0.05,
         std_max: float = 0.8,
+        squash: bool = True,
+        noise_scheduling: bool = True,
         device: torch.device = None,
     ):
         super().__init__()
@@ -454,9 +459,10 @@ class Actor(nn.Module):
             action_dim=n_act,
             scaler_init=1.0,
             scaler_scale=1.0,
+            squash=squash,
             device=device,
         )
-
+        self.noise_scheduling = noise_scheduling
         noise_scales = (
             torch.rand(num_envs, 1, device=device) * (std_max - std_min) + std_min
         )
@@ -478,19 +484,19 @@ class Actor(nn.Module):
         self, obs: torch.Tensor, dones: torch.Tensor = None, deterministic: bool = False
     ) -> torch.Tensor:
         # If dones is provided, resample noise for environments that are done
-        if dones is not None and dones.sum() > 0:
-            # Generate new noise scales for done environments (one per environment)
-            new_scales = (
-                torch.rand(self.n_envs, 1, device=obs.device)
-                * (self.std_max - self.std_min)
-                + self.std_min
-            )
-
-            # Update only the noise scales for environments that are done
-            dones_view = dones.view(-1, 1) > 0
-            self.noise_scales.copy_(
-                torch.where(dones_view, new_scales, self.noise_scales)
-            )
+        # if dones is not None and dones.sum() > 0:
+        #     # Generate new noise scales for done environments (one per environment)
+        #     new_scales = (
+        #         torch.rand(self.n_envs, 1, device=obs.device)
+        #         * (self.std_max - self.std_min)
+        #         + self.std_min
+        #     )
+        #
+        #     # Update only the noise scales for environments that are done
+        #     dones_view = dones.view(-1, 1) > 0
+        #     self.noise_scales.copy_(
+        #         torch.where(dones_view, new_scales, self.noise_scales)
+        #     )
 
         act = self(obs)
         if deterministic:

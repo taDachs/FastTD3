@@ -14,10 +14,11 @@ class IsaacLabEnv:
         num_envs: int,
         seed: int,
         action_bounds: Optional[float] = None,
+        headless: bool = True,
     ):
         from isaaclab.app import AppLauncher
 
-        app_launcher = AppLauncher(headless=True, device=device)
+        app_launcher = AppLauncher(headless=headless, device=device)
         simulation_app = app_launcher.app
 
         import isaaclab_tasks
@@ -37,7 +38,11 @@ class IsaacLabEnv:
         self.max_episode_steps = self.envs.unwrapped.max_episode_length
         self.action_bounds = action_bounds
         self.num_obs = self.envs.unwrapped.single_observation_space["policy"].shape[0]
-        self.asymmetric_obs = "critic" in self.envs.unwrapped.single_observation_space
+        print(list(self.envs.unwrapped.single_observation_space.keys()))
+        self.asymmetric_obs = "critic" in self.envs.unwrapped.single_observation_space.keys()
+        print("critic" in self.envs.unwrapped.single_observation_space.keys())
+        print("critic" in self.envs.unwrapped.single_observation_space)
+        print(type(self.envs.unwrapped.single_observation_space))
         if self.asymmetric_obs:
             self.num_privileged_obs = self.envs.unwrapped.single_observation_space[
                 "critic"

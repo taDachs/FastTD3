@@ -1,0 +1,66 @@
+program: fast_td3/train.py
+method: random
+metric:
+  goal: maximize
+  name: "Curriculum/terrain_levels"
+parameters:
+  env-name:
+    value: "Unitree-Go2-Velocity"
+  seed:
+    value: 1
+  render-interval:
+    value: 0
+  total-timesteps:
+    value: 20000
+
+  agent:
+    values: ["fasttd3", "fasttd3_simbav2"]
+  num-envs:
+    values: [512, 1024, 2048, 4096, 8192]
+  critic-learning-rate:
+    values: [1.0e-4, 3.0e-4, 1.0e-3, 3.0e-3]
+  actor-learning-rate:
+    values: [1.0e-4, 3.0e-4, 1.0e-3, 3.0e-3]
+  critic-learning-rate-end:
+    values: [1.0e-4, 3.0e-4, 1.0e-3, 3.0e-3]
+  actor-learning-rate-end:
+    values: [1.0e-4, 3.0e-4, 1.0e-3, 3.0e-3]
+  buffer-size:
+    values: [1000, 2000, 5000, 10000]
+  num-steps:
+    values: [1, 2, 4, 8, 16, 32]
+  gamma:
+    values: [0.99, 0.98, 0.97]
+  batch-size:
+    values: [10000, 20000, 32768]
+  no-noise-scheduling:
+    values: [false, true]
+  policy-noise:
+    values: [0.1, 0.01, 0.001, 0.0001]
+  std-min:
+    values: [0.1, 0.01, 0.001, 0.0001]
+  std-max:
+    values: [1.0, 0.5, 0.1, 0.05]
+  policy-frequency:
+    values: [1, 2, 4, 8, 16]
+  num-updates:
+    values: [1, 2, 4, 8, 16]
+  critic-hidden_dim:
+    values: [128, 256, 512, 1024, 2048, 4096]
+  actor-hidden_dim:
+    values: [128, 256, 512, 1024, 2048, 4096]
+  reward-normalization:
+    values: [true, false]
+
+  no-squash:
+    values: [true, false]
+  action-bounds:
+    values: [1.0, 2.0, 4.0, 8.0]
+
+  teacher-obs-path:
+    values: ["", "../../stored_transitions"]
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_boolean_flags}

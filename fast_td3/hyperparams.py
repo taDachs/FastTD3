@@ -52,6 +52,8 @@ class BaseArgs:
     """target smoothing coefficient (default: 0.005)"""
     batch_size: int = 32768
     """the batch size of sample from the replay memory"""
+    noise_scheduling: bool = True
+    """If true, resample the policy noise on done"""
     policy_noise: float = 0.001
     """the scale of policy noise"""
     std_min: float = 0.001
@@ -109,13 +111,20 @@ class BaseArgs:
     disable_bootstrap: bool = False
     """Whether to disable bootstrap in the critic learning"""
 
+    squash: bool = True
+    """Whether or not use a tanh to squash the actions between -1 and 1"""
+    action_low: float = -1.0
+    """Max value for action, everything above gets clipped"""
+    action_high: float = 1.0
+    """Min value for action, everything below gets clipped"""
+
     use_domain_randomization: bool = False
     """(Playground only) whether to use domain randomization"""
     use_push_randomization: bool = False
     """(Playground only) whether to use push randomization"""
     use_tuned_reward: bool = False
     """(Playground only) Use tuned reward for G1"""
-    action_bounds: float = 1.0
+    action_bounds: float | None = None
     """(IsaacLab only) the bounds of the action space (-action_bounds, action_bounds)"""
     task_embedding_dim: int = 32
     """the dimension of the task embedding"""
@@ -124,6 +133,9 @@ class BaseArgs:
     """the weight decay of the optimizer"""
     save_interval: int = 5000
     """the interval to save the model"""
+
+    teacher_obs_path: str | None = None
+    """path to tensordict containing teacher observations"""
 
 
 def get_args():
@@ -176,6 +188,7 @@ def get_args():
         "Isaac-Repose-Cube-Allegro-Direct-v0": IsaacReposeCubeAllegroDirectArgs,
         "Isaac-Repose-Cube-Shadow-Direct-v0": IsaacReposeCubeShadowDirectArgs,
         "Unitree-Go2-Velocity": UnitreeGo2VelocityArgs,
+        "Unitree-H1-Velocity": UnitreeH1VelocityArgs,
         # MTBench
         "MTBench-meta-world-v2-mt10": MetaWorldMT10Args,
         "MTBench-meta-world-v2-mt50": MetaWorldMT50Args,
@@ -437,7 +450,7 @@ class IsaacLabArgs(BaseArgs):
     buffer_size: int = 1024 * 10
     num_envs: int = 4096
     num_eval_envs: int = 4096
-    action_bounds: float = 1.0
+    action_bounds: float | None = 1.0
     std_max: float = 0.4
     num_atoms: int = 251
     render_interval: int = 0  # IsaacLab does not support rendering in our codebase
@@ -456,7 +469,7 @@ class IsaacLiftCubeFrankaArgs(IsaacLabArgs):
     std_max: float = 0.8
     num_envs: int = 1024
     num_eval_envs: int = 1024
-    action_bounds: float = 3.0
+    action_bounds: float | None = 3.0
     disable_bootstrap: bool = True
     total_timesteps: int = 20000
 
@@ -468,7 +481,7 @@ class IsaacOpenDrawerFrankaArgs(IsaacLabArgs):
     v_min: float = -50.0
     v_max: float = 50.0
     num_updates: int = 8
-    action_bounds: float = 3.0
+    action_bounds: float | None = 3.0
     total_timesteps: int = 20000
 
 
@@ -526,13 +539,30 @@ class UnitreeGo2VelocityArgs(IsaacLabArgs):
     env_name: str = "Unitree-Go2-Velocity"
     num_steps: int = 8
     num_updates: int = 4
-    total_timesteps: int = 50000
+    total_timesteps: int = 100000
     # my adjustments:
-    gamma: float = 0.97
-    std_min: float = 0.2
-    std_max: float = 0.8
-    policy_noise: float = 0.2
+    # buffer_size: int = 1024 * 5  # To reduce memory usage
+    #
+    # action_bounds: float | None  = None
+    # squash: bool = False
+    action_low: float = -100.0
+    action_high: float = 100.0
 
-    action_bounds = 1.0
 
-    buffer_size: int = 1024 * 5  # To reduce memory usage
+@dataclass
+class UnitreeH1VelocityArgs(IsaacLabArgs):
+    env_name: str = "Unitree-H1-Velocity"
+    num_steps: int = 8
+    num_updates: int = 4
+    total_timesteps: int = 50000
+
+    # my adjustments:
+    action_bounds: float | None  = None
+
+@dataclass
+class UnitreeG1VelocityArgs(IsaacLabArgs):
+    env_name: str = "Unitree-G1-Velocity"
+    num_steps: int = 8
+    num_updates: int = 4
+    total_timesteps: int = 50000
+

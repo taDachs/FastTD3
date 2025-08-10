@@ -30,7 +30,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.amp import autocast, GradScaler
 
-from tensordict import TensorDict
+from tensordict import TensorDict, merge_tensordicts, is_tensor_collection
 
 from fast_td3_utils import (
     EmpiricalNormalization,
@@ -107,7 +107,7 @@ def main():
             device.type,
             args.num_envs,
             args.seed,
-            action_bounds=args.action_bounds,
+            action_bounds=args.action_bounds if args.squash else None,
         )
         eval_envs = envs
         render_env = envs
@@ -145,7 +145,9 @@ def main():
         )
     else:
         n_critic_obs = n_obs
-    action_low, action_high = -1.0, 1.0
+    action_low, action_high = args.action_low, args.action_high
+    print(action_low)
+    # exit()
 
     if args.obs_normalization:
         obs_normalizer = EmpiricalNormalization(shape=n_obs, device=device)
@@ -180,6 +182,8 @@ def main():
         "device": device,
         "init_scale": args.init_scale,
         "hidden_dim": args.actor_hidden_dim,
+        "squash": args.squash,
+        "noise_scheduling": args.noise_scheduling,
     }
     critic_kwargs = {
         "n_obs": n_critic_obs,
@@ -303,6 +307,32 @@ def main():
         gamma=args.gamma,
         device=device,
     )
+
+    if args.teacher_obs_path:
+        teacher_dict: TensorDict = TensorDict.load_memmap(args.teacher_obs_path)
+        teacher_buffer_size = len(teacher_dict["observations"][0])
+        teacher_rb = SimpleReplayBuffer(
+            n_env=args.num_envs,
+            buffer_size=teacher_buffer_size,
+            n_obs=n_obs,
+            n_act=n_act,
+            n_critic_obs=n_critic_obs,
+            asymmetric_obs=envs.asymmetric_obs,
+            playground_mode=env_type == "mujoco_playground",
+            n_steps=args.num_steps,
+            gamma=args.gamma,
+            device=device,
+        )
+
+        for i in range(teacher_buffer_size):
+            def get_slice(val):
+                if is_tensor_collection(val):
+                    # Recurse
+                    return val.apply(get_slice, call_on_nested=True)
+                return val[:, i]
+            slice = teacher_dict.apply(get_slice)
+            teacher_rb.extend(slice)
+
 
     policy_noise = args.policy_noise
     noise_clip = args.noise_clip
@@ -630,7 +660,25 @@ def main():
 
         if global_step > args.learning_starts:
             for i in range(args.num_updates):
-                data = rb.sample(max(1, args.batch_size // args.num_envs))
+                batch_size = args.batch_size // args.num_envs
+                if args.teacher_obs_path:
+                    teacher_data = teacher_rb.sample(max(1, batch_size // 2))
+                    student_data = rb.sample(max(1, batch_size // 2))
+                    data = TensorDict({
+                        "observations": torch.cat([student_data["observations"], teacher_data["observations"]], dim=0),
+                        "critic_observations": torch.cat([student_data["critic_observations"], teacher_data["critic_observations"]], dim=0),
+                        "actions": torch.cat([student_data["actions"], teacher_data["actions"]], dim=0),
+                        "next": {
+                            "observations": torch.cat([student_data["next"]["observations"], teacher_data["next"]["observations"]], dim=0),
+                            "critic_observations": torch.cat([student_data["next"]["critic_observations"], teacher_data["next"]["critic_observations"]], dim=0),
+                            "rewards": torch.cat([student_data["next"]["rewards"], teacher_data["next"]["rewards"]], dim=0),
+                            "truncations": torch.cat([student_data["next"]["truncations"], teacher_data["next"]["truncations"]], dim=0),
+                            "dones": torch.cat([student_data["next"]["dones"], teacher_data["next"]["dones"]], dim=0),
+                            "effective_n_steps": torch.cat([student_data["next"]["effective_n_steps"], teacher_data["next"]["effective_n_steps"]], dim=0),
+                        },
+                    })
+                else:
+                    data = rb.sample(max(1, batch_size))
                 data["observations"] = normalize_obs(data["observations"])
                 data["next"]["observations"] = normalize_obs(
                     data["next"]["observations"]
