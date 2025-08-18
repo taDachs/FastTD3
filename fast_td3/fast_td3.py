@@ -12,9 +12,10 @@ class DistributionalQNetwork(nn.Module):
         v_min: float,
         v_max: float,
         hidden_dim: int,
-        device: torch.device = None,
+        device: torch.device | None = None,
     ):
         super().__init__()
+
         self.net = nn.Sequential(
             nn.Linear(n_obs + n_act, hidden_dim, device=device),
             nn.ReLU(),
@@ -153,6 +154,98 @@ class Critic(nn.Module):
         return torch.sum(probs * self.q_support, dim=1)
 
 
+class RNNActor(nn.Module):
+    def __init__(
+        self,
+        n_obs: int,
+        n_act: int,
+        num_envs: int,
+        init_scale: float,
+        hidden_dim: int,
+        std_min: float = 0.05,
+        std_max: float = 0.8,
+        squash: bool = True,
+        noise_scheduling: bool = True,
+        memory_hidden_dim: int | None = None,
+        device: torch.device | None = None,
+    ):
+        super().__init__()
+
+        self.n_obs = n_obs
+        self.n_act = n_act
+
+        if memory_hidden_dim is None:
+        #     memory_hidden_dim = hidden_dim
+            memory_hidden_dim = n_obs
+        self.memory_hidden_dim = memory_hidden_dim
+        self.memory = nn.GRU(n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+
+        self.net = nn.Sequential(
+            nn.Linear(memory_hidden_dim, hidden_dim, device=device),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim // 2, device=device),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4, device=device),
+            nn.ReLU(),
+        )
+        if squash:
+            self.fc_mu = nn.Sequential(
+                nn.Linear(hidden_dim // 4, n_act, device=device),
+                nn.Tanh(),
+            )
+        else:
+            self.fc_mu = nn.Sequential(nn.Linear(hidden_dim // 4, n_act, device=device))
+
+        nn.init.normal_(self.fc_mu[0].weight, 0.0, init_scale)
+        nn.init.constant_(self.fc_mu[0].bias, 0.0)
+
+        self.noise_scheduling = noise_scheduling
+        noise_scales = (
+            torch.rand(num_envs, 1, device=device) * (std_max - std_min) + std_min
+        )
+        self.register_buffer("noise_scales", noise_scales)
+
+        self.register_buffer("std_min", torch.as_tensor(std_min, device=device))
+        self.register_buffer("std_max", torch.as_tensor(std_max, device=device))
+        self.n_envs = num_envs
+        self.device = device
+
+    def forward(self, obs: torch.Tensor, hidden_in: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        time_latent, hidden_out = self.memory(obs, hidden_in)
+        # hidden_out = hidden_in
+        # time_latent = obs
+        x = self.net(time_latent)
+        action = self.fc_mu(x)
+        return action, hidden_out
+
+    def explore(
+        self, obs: torch.Tensor, hidden_in: torch.Tensor, dones: torch.Tensor = None, deterministic: bool = False,
+    ) -> torch.Tensor:
+        if self.noise_scheduling:
+            # If dones is provided, resample noise for environments that are done
+            if dones is not None and dones.sum() > 0:
+                # Generate new noise scales for done environments (one per environment)
+                new_scales = (
+                    torch.rand(self.n_envs, 1, device=obs.device)
+                    * (self.std_max - self.std_min)
+                    + self.std_min
+                )
+
+                # Update only the noise scales for environments that are done
+                dones_view = dones.view(-1, 1) > 0
+                self.noise_scales.copy_(
+                    torch.where(dones_view, new_scales, self.noise_scales)
+                )
+
+        obs = obs.unsqueeze(1)
+        act, hidden_out = self(obs, hidden_in)
+        act = act.squeeze(1)
+        if deterministic:
+            return act
+
+        noise = torch.randn_like(act) * self.noise_scales
+        return act + noise, hidden_out
+
 class Actor(nn.Module):
     def __init__(
         self,
@@ -165,10 +258,12 @@ class Actor(nn.Module):
         std_max: float = 0.8,
         squash: bool = True,
         noise_scheduling: bool = True,
-        device: torch.device = None,
+        device: torch.device | None = None,
     ):
         super().__init__()
+
         self.n_act = n_act
+
         self.net = nn.Sequential(
             nn.Linear(n_obs, hidden_dim, device=device),
             nn.ReLU(),

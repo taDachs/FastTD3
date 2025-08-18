@@ -136,6 +136,9 @@ class BaseArgs:
 
     teacher_obs_path: str | None = None
     """path to tensordict containing teacher observations"""
+    seq_len: int = 50
+    """sequence length for RNN"""
+    memory_hidden_dim: int = 256
 
 
 def get_args():
@@ -537,16 +540,26 @@ class IsaacReposeCubeShadowDirectArgs(IsaacLabArgs):
 @dataclass
 class UnitreeGo2VelocityArgs(IsaacLabArgs):
     env_name: str = "Unitree-Go2-Velocity"
-    num_steps: int = 8
-    num_updates: int = 4
     total_timesteps: int = 100000
+
     # my adjustments:
-    # buffer_size: int = 1024 * 5  # To reduce memory usage
-    #
-    # action_bounds: float | None  = None
-    # squash: bool = False
     action_low: float = -100.0
     action_high: float = 100.0
+    action_bounds: float | None  = None
+
+    actor_hidden_dim: int = 1024
+    actor_learning_rate: float = 1e-4
+    gamma: float = 0.98
+    buffer_size: int = 1024 * 5  # To reduce memory usage
+    squash: bool = False
+    noise_scheduling: bool = True
+    num_steps: int = 1
+    num_updates: int = 16
+    policy_frequency: int = 8
+    policy_noise: float = 0.1
+    reward_normalization: bool = True
+    std_max: float = 0.1
+    std_min: float = 0.1
 
 
 @dataclass

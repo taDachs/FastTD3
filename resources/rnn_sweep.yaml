@@ -1,0 +1,47 @@
+program: fast_td3/train_rnn.py
+method: random
+metric:
+  goal: maximize
+  name: "Curriculum/terrain_levels"
+parameters:
+  env_name:
+    value: "Unitree-Go2-Velocity"
+  seed:
+    value: 1
+  render_interval:
+    value: 0
+  total_timesteps:
+    value: 10000
+
+  num_envs:
+    values: [512, 1024, 2048, 4096, 8192]
+  buffer_size:
+    values: [1000, 2000, 5000, 10000]
+  num_steps:
+    values: [1, 4, 8, 16]
+  batch_size:
+    values: [1000, 5000, 10000, 20000, 32768]
+  std_min:
+    values: [0.1, 0.01]
+  std_max:
+    values: [0.4, 0.1]
+  policy_frequency:
+    values: [1, 2, 4, 8, 16]
+  num_updates:
+    values: [1, 2, 4, 8, 16]
+  critic_hidden_dim:
+    values: [512, 1024, 2048]
+  actor_hidden_dim:
+    values: [512, 1024, 2048]
+  memory_hidden_dim:
+    values: [128, 256, 512, 1024]
+  reward_normalization:
+    values: [true, false]
+  seq_len:
+    values: [10, 25, 50]
+
+command:
+  - ${env}
+  - ${interpreter}
+  - ${program}
+  - ${args_no_boolean_flags}
