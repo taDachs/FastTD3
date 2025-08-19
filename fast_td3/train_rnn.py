@@ -309,7 +309,6 @@ def main():
         n_steps=args.num_steps,
         gamma=args.gamma,
         device=device,
-        seq_len=args.seq_len,
     )
 
     if args.teacher_obs_path:
@@ -326,7 +325,6 @@ def main():
             n_steps=args.num_steps,
             gamma=args.gamma,
             device=device,
-            seq_len=args.seq_len,
         )
 
         for i in range(teacher_buffer_size):
@@ -567,6 +565,50 @@ def main():
         torch._foreach_mul_(tgt_ps, 1.0 - tau)
         torch._foreach_add_(tgt_ps, src_ps, alpha=tau)
 
+    def sample_batch(batch_size: int, seq_len: int):
+        if args.teacher_obs_path:
+            teacher_data = teacher_rb.sample(max(1, batch_size // 2), seq_len=seq_len)
+            student_data = rb.sample(max(1, batch_size // 2), seq_len=seq_len)
+            data = TensorDict({
+                "observations": torch.cat([student_data["observations"], teacher_data["observations"]], dim=0),
+                "critic_observations": torch.cat([student_data["critic_observations"], teacher_data["critic_observations"]], dim=0),
+                "actions": torch.cat([student_data["actions"], teacher_data["actions"]], dim=0),
+                "next": {
+                    "observations": torch.cat([student_data["next"]["observations"], teacher_data["next"]["observations"]], dim=0),
+                    "critic_observations": torch.cat([student_data["next"]["critic_observations"], teacher_data["next"]["critic_observations"]], dim=0),
+                    "rewards": torch.cat([student_data["next"]["rewards"], teacher_data["next"]["rewards"]], dim=0),
+                    "truncations": torch.cat([student_data["next"]["truncations"], teacher_data["next"]["truncations"]], dim=0),
+                    "dones": torch.cat([student_data["next"]["dones"], teacher_data["next"]["dones"]], dim=0),
+                    "effective_n_steps": torch.cat([student_data["next"]["effective_n_steps"], teacher_data["next"]["effective_n_steps"]], dim=0),
+                },
+            })
+        else:
+            data = rb.sample(max(1, batch_size), seq_len=seq_len)
+        data["observations"] = normalize_obs(data["observations"].reshape(-1, n_obs)).reshape(-1, seq_len, n_obs)
+        data["next"]["observations"] = normalize_obs(
+            data["next"]["observations"].reshape(-1, n_obs)
+        ).reshape(-1, seq_len, n_obs)
+        if envs.asymmetric_obs:
+            data["critic_observations"] = normalize_critic_obs(
+                data["critic_observations"].reshape(-1, n_critic_obs)
+            ).reshape(-1, seq_len, n_critic_obs)
+            data["next"]["critic_observations"] = normalize_critic_obs(
+                data["next"]["critic_observations"].reshape(-1, n_critic_obs)
+            ).reshape(-1, seq_len, n_critic_obs)
+        raw_rewards = data["next"]["rewards"]
+        if env_type in ["mtbench"] and args.reward_normalization:
+            # Multi-task reward normalization
+            task_ids_one_hot = data["observations"][..., -envs.num_tasks :]
+            task_indices = torch.argmax(task_ids_one_hot, dim=1)
+            data["next"]["rewards"] = normalize_reward(
+                raw_rewards, task_ids=task_indices
+            )
+        else:
+            data["next"]["rewards"] = normalize_reward(raw_rewards)
+
+        return data, raw_rewards
+
+
     if args.compile:
         compile_mode = args.compile_mode
         update_main = torch.compile(update_main, mode=compile_mode)
@@ -687,53 +729,19 @@ def main():
 
         if global_step > args.learning_starts:
             for i in range(args.num_updates):
-                batch_size = args.batch_size // args.num_envs
-                if args.teacher_obs_path:
-                    teacher_data = teacher_rb.sample(max(1, batch_size // 2))
-                    student_data = rb.sample(max(1, batch_size // 2))
-                    data = TensorDict({
-                        "observations": torch.cat([student_data["observations"], teacher_data["observations"]], dim=0),
-                        "critic_observations": torch.cat([student_data["critic_observations"], teacher_data["critic_observations"]], dim=0),
-                        "actions": torch.cat([student_data["actions"], teacher_data["actions"]], dim=0),
-                        "next": {
-                            "observations": torch.cat([student_data["next"]["observations"], teacher_data["next"]["observations"]], dim=0),
-                            "critic_observations": torch.cat([student_data["next"]["critic_observations"], teacher_data["next"]["critic_observations"]], dim=0),
-                            "rewards": torch.cat([student_data["next"]["rewards"], teacher_data["next"]["rewards"]], dim=0),
-                            "truncations": torch.cat([student_data["next"]["truncations"], teacher_data["next"]["truncations"]], dim=0),
-                            "dones": torch.cat([student_data["next"]["dones"], teacher_data["next"]["dones"]], dim=0),
-                            "effective_n_steps": torch.cat([student_data["next"]["effective_n_steps"], teacher_data["next"]["effective_n_steps"]], dim=0),
-                        },
-                    })
-                else:
-                    data = rb.sample(max(1, batch_size))
-                data["observations"] = normalize_obs(data["observations"].reshape(-1, n_obs)).reshape(-1, args.seq_len, n_obs)
-                data["next"]["observations"] = normalize_obs(
-                    data["next"]["observations"].reshape(-1, n_obs)
-                ).reshape(-1, args.seq_len, n_obs)
-                if envs.asymmetric_obs:
-                    data["critic_observations"] = normalize_critic_obs(
-                        data["critic_observations"].reshape(-1, n_critic_obs)
-                    ).reshape(-1, args.seq_len, n_critic_obs)
-                    data["next"]["critic_observations"] = normalize_critic_obs(
-                        data["next"]["critic_observations"].reshape(-1, n_critic_obs)
-                    ).reshape(-1, args.seq_len, n_critic_obs)
-                raw_rewards = data["next"]["rewards"]
-                if env_type in ["mtbench"] and args.reward_normalization:
-                    # Multi-task reward normalization
-                    task_ids_one_hot = data["observations"][..., -envs.num_tasks :]
-                    task_indices = torch.argmax(task_ids_one_hot, dim=1)
-                    data["next"]["rewards"] = normalize_reward(
-                        raw_rewards, task_ids=task_indices
-                    )
-                else:
-                    data["next"]["rewards"] = normalize_reward(raw_rewards)
+                batch_size = max(args.batch_size // args.num_envs, 1)
+                data, raw_rewards = sample_batch(batch_size, 1)
 
                 logs_dict = update_main(data, logs_dict)
                 if args.num_updates > 1:
-                    if i % args.policy_frequency == 1:
+                    if i % args.policy_frequency == 1 or args.policy_frequency == 1:
+                        policy_batch_size = max(args.batch_size // (args.num_envs * args.seq_len), 1)
+                        data, _ = sample_batch(policy_batch_size, args.seq_len)
                         logs_dict = update_pol(data, logs_dict)
                 else:
                     if global_step % args.policy_frequency == 0:
+                        policy_batch_size = args.batch_size // (args.num_envs * args.seq_len)
+                        data, _ = sample_batch(policy_batch_size, args.seq_len)
                         logs_dict = update_pol(data, logs_dict)
 
                 soft_update(qnet, qnet_target, args.tau)

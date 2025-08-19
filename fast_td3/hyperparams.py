@@ -139,7 +139,11 @@ class BaseArgs:
     seq_len: int = 50
     """sequence length for RNN"""
     memory_hidden_dim: int = 256
-
+    """hidden dim for GRU"""
+    num_mini_steps_critic: int = 1
+    """mini steps for critic"""
+    num_mini_steps_actor: int = 8
+    """mini steps for actor"""
 
 def get_args():
     """

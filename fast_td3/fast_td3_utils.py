@@ -435,7 +435,6 @@ class SequenceReplayBuffer(nn.Module):
         self.playground_mode = playground_mode and asymmetric_obs
         self.gamma = gamma
         self.n_steps = n_steps
-        self.seq_len = seq_len
         self.device = device
 
         self.observations = torch.zeros(
@@ -514,7 +513,7 @@ class SequenceReplayBuffer(nn.Module):
         self.ptr += 1
 
     @torch.no_grad()
-    def sample(self, batch_size: int):
+    def sample(self, batch_size: int, seq_len: int):
         # we will sample n_env * batch_size * seq_len transitions
         # Sample base indices
         if self.ptr >= self.buffer_size:
@@ -535,7 +534,7 @@ class SequenceReplayBuffer(nn.Module):
             )
         else:
             # Buffer not full - ensure sequence doesn't exceed valid data
-            max_start_idx = max(1, self.ptr - self.seq_len + 1)
+            max_start_idx = max(1, self.ptr - seq_len + 1)
             start_indices = torch.randint(
                 0,
                 max_start_idx,
@@ -545,7 +544,7 @@ class SequenceReplayBuffer(nn.Module):
 
         # Create sequential indices for each sample
         # This creates a [n_env, batch_size, seq_len] tensor of indices
-        seq_offsets = torch.arange(self.seq_len, device=self.device).view(1, 1, -1)
+        seq_offsets = torch.arange(seq_len, device=self.device).view(1, 1, -1)
         seq_indices = (
             start_indices.unsqueeze(-1) + seq_offsets
         ) % self.buffer_size  # [n_env, batch_size, seq_len]
@@ -557,10 +556,10 @@ class SequenceReplayBuffer(nn.Module):
 
         # Get base transitions
         observations = torch.gather(self.observations, 1, obs_indices).reshape(
-            self.n_env * batch_size, self.seq_len, self.n_obs
+            self.n_env * batch_size, seq_len, self.n_obs
         )
         actions = torch.gather(self.actions, 1, act_indices).reshape(
-            self.n_env * batch_size, self.seq_len, self.n_act
+            self.n_env * batch_size, seq_len, self.n_act
         )
         if self.asymmetric_obs:
             if self.playground_mode:
@@ -570,7 +569,7 @@ class SequenceReplayBuffer(nn.Module):
                 )
                 privileged_observations = torch.gather(
                     self.privileged_observations, 1, priv_obs_indices
-                ).reshape(self.n_env * batch_size, self.seq_len, self.privileged_obs_size)
+                ).reshape(self.n_env * batch_size, seq_len, self.privileged_obs_size)
 
                 # Concatenate with regular observations to form full critic observations
                 critic_observations = torch.cat(
@@ -583,17 +582,17 @@ class SequenceReplayBuffer(nn.Module):
                 )
                 critic_observations = torch.gather(
                     self.critic_observations, 1, critic_obs_indices
-                ).reshape(self.n_env * batch_size, self.seq_len, self.n_critic_obs)
+                ).reshape(self.n_env * batch_size, seq_len, self.n_critic_obs)
 
         sequence_dones = torch.gather(
-            self.dones.unsqueeze(-1).expand(-1, -1, self.seq_len), 1, seq_indices
+            self.dones.unsqueeze(-1).expand(-1, -1, seq_len), 1, seq_indices
         )
         sequence_dones_shifted = torch.cat(
             [torch.zeros_like(sequence_dones[:, :, :1]), sequence_dones[:, :, :-1]], dim=2
         )  # First reward should not be masked
         sequence_done_masks = torch.cumprod(
             1 - sequence_dones_shifted, dim=2
-        ).reshape(self.n_env * batch_size, self.seq_len)
+        ).reshape(self.n_env * batch_size, seq_len)
 
         # Gather all rewards and terminal flags
         # Using advanced indexing - result shapes: [n_env, batch_size, n_step]
@@ -711,16 +710,16 @@ class SequenceReplayBuffer(nn.Module):
                     )
                 )
                 next_critic_observations = final_next_critic_observations.reshape(
-                    self.n_env * batch_size, self.seq_len, self.n_critic_obs
+                    self.n_env * batch_size, seq_len, self.n_critic_obs
                 )
 
         # Reshape everything to batch dimension
-        rewards = n_step_rewards.reshape(self.n_env * batch_size, self.seq_len)
-        dones = final_dones.reshape(self.n_env * batch_size, self.seq_len)
-        truncations = final_truncations.reshape(self.n_env * batch_size, self.seq_len)
-        effective_n_steps = effective_n_steps.reshape(self.n_env * batch_size, self.seq_len)
+        rewards = n_step_rewards.reshape(self.n_env * batch_size, seq_len)
+        dones = final_dones.reshape(self.n_env * batch_size, seq_len)
+        truncations = final_truncations.reshape(self.n_env * batch_size, seq_len)
+        effective_n_steps = effective_n_steps.reshape(self.n_env * batch_size, seq_len)
         next_observations = final_next_observations.reshape(
-            self.n_env * batch_size, self.seq_len, self.n_obs
+            self.n_env * batch_size, seq_len, self.n_obs
         )
 
         out = TensorDict(
