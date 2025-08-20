@@ -136,10 +136,16 @@ class BaseArgs:
 
     teacher_obs_path: str | None = None
     """path to tensordict containing teacher observations"""
+
     seq_len: int = 50
     """sequence length for RNN"""
+    use_seq_critic: bool = False
+    """If false, uses no sequence for critic (seq_len is 1), else uses same sequence length as for policy"""
+    memory_type: str = "gru"
+    """what memory type to use (gru or lstm)"""
     memory_hidden_dim: int = 256
     """hidden dim for GRU"""
+
     num_mini_steps_critic: int = 1
     """mini steps for critic"""
     num_mini_steps_actor: int = 8
@@ -552,7 +558,8 @@ class UnitreeGo2VelocityArgs(IsaacLabArgs):
     action_bounds: float | None  = None
 
     actor_hidden_dim: int = 1024
-    actor_learning_rate: float = 1e-4
+    actor_learning_rate: float = 3e-4
+    actor_learning_rate_end: float = 1e-4
     gamma: float = 0.98
     buffer_size: int = 1024 * 5  # To reduce memory usage
     squash: bool = False

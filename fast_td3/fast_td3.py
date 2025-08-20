@@ -166,6 +166,7 @@ class RNNActor(nn.Module):
         std_max: float = 0.8,
         squash: bool = True,
         noise_scheduling: bool = True,
+        memory_type: str = "gru",
         memory_hidden_dim: int | None = None,
         device: torch.device | None = None,
     ):
@@ -175,10 +176,17 @@ class RNNActor(nn.Module):
         self.n_act = n_act
 
         if memory_hidden_dim is None:
-        #     memory_hidden_dim = hidden_dim
-            memory_hidden_dim = n_obs
+            memory_hidden_dim = hidden_dim
+        # memory_hidden_dim = n_obs
+        # memory_hidden_dim = hidden_dim
         self.memory_hidden_dim = memory_hidden_dim
-        self.memory = nn.GRU(n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+        self.memory_type = memory_type
+        if self.memory_type == "gru":
+            self.memory = nn.GRU(n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+        elif self.memory_type == "lstm":
+            self.memory = nn.LSTM(n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+        else:
+            raise NotImplementedError
 
         self.net = nn.Sequential(
             nn.Linear(memory_hidden_dim, hidden_dim, device=device),
@@ -210,7 +218,9 @@ class RNNActor(nn.Module):
         self.n_envs = num_envs
         self.device = device
 
-    def forward(self, obs: torch.Tensor, hidden_in: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self, obs: torch.Tensor, hidden_in: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
         time_latent, hidden_out = self.memory(obs, hidden_in)
         # hidden_out = hidden_in
         # time_latent = obs
@@ -219,8 +229,8 @@ class RNNActor(nn.Module):
         return action, hidden_out
 
     def explore(
-        self, obs: torch.Tensor, hidden_in: torch.Tensor, dones: torch.Tensor = None, deterministic: bool = False,
-    ) -> torch.Tensor:
+        self, obs: torch.Tensor, hidden_in: torch.Tensor | tuple[torch.Tensor, torch.Tensor], dones: torch.Tensor = None, deterministic: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.noise_scheduling:
             # If dones is provided, resample noise for environments that are done
             if dones is not None and dones.sum() > 0:

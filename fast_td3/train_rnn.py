@@ -184,6 +184,7 @@ def main():
         "hidden_dim": args.actor_hidden_dim,
         "squash": args.squash,
         "noise_scheduling": args.noise_scheduling,
+        "memory_type": args.memory_type,
         "memory_hidden_dim": args.memory_hidden_dim
     }
     critic_kwargs = {
@@ -352,7 +353,15 @@ def main():
             obs = eval_envs.reset()
 
         # Run for a fixed number of steps
-        hidden_in = torch.zeros(1, args.num_envs, actor.memory_hidden_dim, device=device)
+        if args.memory_type == "gru":
+            hidden_in = torch.zeros(1, args.num_envs, actor.memory_hidden_dim, device=device)
+        elif args.memory_type == "lstm":
+            hidden_in = (
+                    torch.zeros(1, args.num_envs, actor.memory_hidden_dim, device=device),
+                    torch.zeros(1, args.num_envs, actor.memory_hidden_dim, device=device)
+            )
+        else:
+            raise NotImplementedError
         for i in range(eval_envs.max_episode_steps):
             with torch.no_grad(), autocast(
                 device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
@@ -445,7 +454,15 @@ def main():
                 -noise_clip, noise_clip
             )
 
-            hidden_in = torch.zeros(1, actions.shape[0], actor.memory_hidden_dim, device=device)
+            if args.memory_type == "gru":
+                hidden_in = torch.zeros(1, actions.shape[0], actor.memory_hidden_dim, device=device)
+            elif args.memory_type == "lstm":
+                hidden_in = (
+                        torch.zeros(1, actions.shape[0], actor.memory_hidden_dim, device=device),
+                        torch.zeros(1, actions.shape[0], actor.memory_hidden_dim, device=device)
+                )
+            else:
+                raise NotImplementedError
             next_state_actions = (actor(next_observations, hidden_in)[0] + clipped_noise).clamp(
                 action_low, action_high
             )
@@ -525,7 +542,15 @@ def main():
                 else data["observations"]
             )
 
-            hidden_in = torch.zeros(1, critic_observations.shape[0], actor.memory_hidden_dim, device=device)
+            if args.memory_type == "gru":
+                hidden_in = torch.zeros(1, critic_observations.shape[0], actor.memory_hidden_dim, device=device)
+            elif args.memory_type == "lstm":
+                hidden_in = (
+                        torch.zeros(1, critic_observations.shape[0], actor.memory_hidden_dim, device=device),
+                        torch.zeros(1, critic_observations.shape[0], actor.memory_hidden_dim, device=device)
+                )
+            else:
+                raise NotImplementedError
             qf1, qf2 = qnet(
                 critic_observations.reshape(-1, n_critic_obs),
                 actor(data["observations"], hidden_in=hidden_in)[0].reshape(-1, n_act),
@@ -656,7 +681,16 @@ def main():
     episode_lengths = torch.zeros(args.num_envs, device=device)
     episode_returns = torch.zeros(args.num_envs, device=device)
 
-    explore_hidden_in = torch.zeros(1, args.num_envs, actor.memory_hidden_dim, device=device)
+    if args.memory_type == "gru":
+        explore_hidden_in = torch.zeros(1, args.num_envs, actor.memory_hidden_dim, device=device)
+    elif args.memory_type == "lstm":
+        explore_hidden_in = (
+                torch.zeros(1, args.num_envs, actor.memory_hidden_dim, device=device),
+                torch.zeros(1, args.num_envs, actor.memory_hidden_dim, device=device)
+        )
+    else:
+        raise NotImplementedError
+
     while global_step < args.total_timesteps:
         mark_step()
         logs_dict = TensorDict()
@@ -729,8 +763,12 @@ def main():
 
         if global_step > args.learning_starts:
             for i in range(args.num_updates):
-                batch_size = max(args.batch_size // args.num_envs, 1)
-                data, raw_rewards = sample_batch(batch_size, 1)
+                if args.use_seq_critic:
+                    batch_size = max(args.batch_size // (args.num_envs * args.seq_len), 1)
+                    data, raw_rewards = sample_batch(batch_size, args.seq_len)
+                else:
+                    batch_size = max(args.batch_size // args.num_envs, 1)
+                    data, raw_rewards = sample_batch(batch_size, 1)
 
                 logs_dict = update_main(data, logs_dict)
                 if args.num_updates > 1:
@@ -740,7 +778,7 @@ def main():
                         logs_dict = update_pol(data, logs_dict)
                 else:
                     if global_step % args.policy_frequency == 0:
-                        policy_batch_size = args.batch_size // (args.num_envs * args.seq_len)
+                        policy_batch_size = max(args.batch_size // (args.num_envs * args.seq_len), 1)
                         data, _ = sample_batch(policy_batch_size, args.seq_len)
                         logs_dict = update_pol(data, logs_dict)
 
@@ -824,7 +862,13 @@ def main():
         pbar.update(1)
 
         explore_hidden_in = explore_hidden_out
-        explore_hidden_in[:, dones == 1] = 0.0
+        if args.memory_type == "gru":
+            explore_hidden_in[:, dones == 1] = 0.0
+        elif args.memory_type == "lstm":
+            explore_hidden_in[0][:, dones == 1] = 0.0
+            explore_hidden_in[1][:, dones == 1] = 0.0
+        else:
+            raise NotImplementedError
 
     save_params(
         global_step,
