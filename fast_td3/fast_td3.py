@@ -168,23 +168,28 @@ class RNNActor(nn.Module):
         noise_scheduling: bool = True,
         memory_type: str = "gru",
         memory_hidden_dim: int | None = None,
+        use_vision_latent: bool = False,
+        vision_latent_dim: bool = False,
         device: torch.device | None = None,
     ):
         super().__init__()
+
+        self.use_vision_latent = use_vision_latent
+        if self.use_vision_latent:
+            n_obs += vision_latent_dim
 
         self.n_obs = n_obs
         self.n_act = n_act
 
         if memory_hidden_dim is None:
             memory_hidden_dim = hidden_dim
-        # memory_hidden_dim = n_obs
-        # memory_hidden_dim = hidden_dim
+        # memory_hidden_dim = self.n_obs
         self.memory_hidden_dim = memory_hidden_dim
         self.memory_type = memory_type
         if self.memory_type == "gru":
-            self.memory = nn.GRU(n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+            self.memory = nn.GRU(self.n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
         elif self.memory_type == "lstm":
-            self.memory = nn.LSTM(n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+            self.memory = nn.LSTM(self.n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
         else:
             raise NotImplementedError
 
@@ -219,8 +224,18 @@ class RNNActor(nn.Module):
         self.device = device
 
     def forward(
-        self, obs: torch.Tensor, hidden_in: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+        self,
+        obs: torch.Tensor,
+        hidden_in: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        vision_latent: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
+        assert len(obs.shape) == 3
+        if self.use_vision_latent:
+            if vision_latent is not None:
+                assert len(vision_latent.shape) == 3
+                obs = torch.cat((obs, vision_latent), dim=-1)
+            else:
+                raise NotImplementedError
         time_latent, hidden_out = self.memory(obs, hidden_in)
         # hidden_out = hidden_in
         # time_latent = obs
@@ -229,8 +244,13 @@ class RNNActor(nn.Module):
         return action, hidden_out
 
     def explore(
-        self, obs: torch.Tensor, hidden_in: torch.Tensor | tuple[torch.Tensor, torch.Tensor], dones: torch.Tensor = None, deterministic: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        self,
+        obs: torch.Tensor,
+        hidden_in: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        dones: torch.Tensor | None = None,
+        vision_latent: torch.Tensor | None = None,
+        deterministic: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.noise_scheduling:
             # If dones is provided, resample noise for environments that are done
             if dones is not None and dones.sum() > 0:
@@ -248,10 +268,12 @@ class RNNActor(nn.Module):
                 )
 
         obs = obs.unsqueeze(1)
-        act, hidden_out = self(obs, hidden_in)
+        if vision_latent is not None:
+            vision_latent = vision_latent.unsqueeze(1)
+        act, hidden_out = self(obs, hidden_in, vision_latent)
         act = act.squeeze(1)
         if deterministic:
-            return act
+            return act, hidden_out
 
         noise = torch.randn_like(act) * self.noise_scales
         return act + noise, hidden_out

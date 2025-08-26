@@ -136,6 +136,18 @@ class BaseArgs:
 
     teacher_obs_path: str | None = None
     """path to tensordict containing teacher observations"""
+    use_vision: bool = False
+    """if true, uses vision model"""
+    vision_input_width: int = 48
+    """input image width"""
+    vision_input_height: int = 48
+    """input image height"""
+    vision_latent_dim: int = 128
+    """dimension of latent embedding for vision backbone"""
+    vision_update_rate: int = 1
+    """update rate for vision obs"""
+    use_next_vision_obs: bool = True
+    """if true, stores next vision obs, else use the current obs"""
 
     seq_len: int = 50
     """sequence length for RNN"""
@@ -145,10 +157,11 @@ class BaseArgs:
     """what memory type to use (gru or lstm)"""
     memory_hidden_dim: int = 256
     """hidden dim for GRU"""
+    memory_burnin: int = 10
 
     num_mini_steps_critic: int = 1
     """mini steps for critic"""
-    num_mini_steps_actor: int = 8
+    num_mini_steps_actor: int = 1
     """mini steps for actor"""
 
 def get_args():
@@ -200,7 +213,9 @@ def get_args():
         "Isaac-Velocity-Rough-G1-v0": IsaacVelocityRoughG1Args,
         "Isaac-Repose-Cube-Allegro-Direct-v0": IsaacReposeCubeAllegroDirectArgs,
         "Isaac-Repose-Cube-Shadow-Direct-v0": IsaacReposeCubeShadowDirectArgs,
+        "Isaac-Ant-v0": IsaacAntv0Args,
         "Unitree-Go2-Velocity": UnitreeGo2VelocityArgs,
+        "Unitree-Go2-Parkour-Student": UnitreeGo2ParkourStudentArgs,
         "Unitree-H1-Velocity": UnitreeH1VelocityArgs,
         # MTBench
         "MTBench-meta-world-v2-mt10": MetaWorldMT10Args,
@@ -572,6 +587,44 @@ class UnitreeGo2VelocityArgs(IsaacLabArgs):
     std_max: float = 0.1
     std_min: float = 0.1
 
+@dataclass
+class UnitreeGo2ParkourStudentArgs(IsaacLabArgs):
+    env_name: str = "Unitree-Go2-Parkour-Student"
+    total_timesteps: int = 100000
+
+    use_vision: bool = True
+    vision_latent_dim: int = 128
+    vision_input_width: int = 48
+    vision_input_height: int = 48
+    vision_update_rate: int = 5
+    use_next_vision_obs: bool = False
+
+    num_envs: int = 512
+
+    # my adjustments:
+    action_low: float = -100.0
+    action_high: float = 100.0
+    action_bounds: float | None  = None
+
+    memory_hidden_dim: int = 1024
+    use_grad_norm_clipping: bool = True
+    memory_burnin: int = 0
+
+    actor_hidden_dim: int = 1024
+    actor_learning_rate: float = 3e-4
+    actor_learning_rate_end: float = 1e-4
+    gamma: float = 0.98
+    buffer_size: int = 5000
+    squash: bool = False
+    noise_scheduling: bool = True
+    num_steps: int = 1
+    num_updates: int = 16
+    policy_frequency: int = 8
+    policy_noise: float = 0.1
+    reward_normalization: bool = True
+    std_max: float = 0.1
+    std_min: float = 0.1
+
 
 @dataclass
 class UnitreeH1VelocityArgs(IsaacLabArgs):
@@ -590,3 +643,5 @@ class UnitreeG1VelocityArgs(IsaacLabArgs):
     num_updates: int = 4
     total_timesteps: int = 50000
 
+class IsaacAntv0Args(IsaacLabArgs):
+    env_name: str = "Isaac-Ant-v0"

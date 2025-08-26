@@ -409,6 +409,10 @@ class SequenceReplayBuffer(nn.Module):
         n_critic_obs: int,
         asymmetric_obs: bool = False,
         playground_mode: bool = False,
+        use_vision: bool = False,
+        vision_size: tuple[int, int] = (48, 48),
+        vision_update_rate: int = 1,
+        use_next_vision_obs: bool = True,
         n_steps: int = 1,
         seq_len: int = 1,
         gamma: float = 0.99,
@@ -433,6 +437,10 @@ class SequenceReplayBuffer(nn.Module):
         self.n_critic_obs = n_critic_obs
         self.asymmetric_obs = asymmetric_obs
         self.playground_mode = playground_mode and asymmetric_obs
+        self.use_vision = use_vision
+        self.vision_size = vision_size
+        self.vision_update_rate = vision_update_rate
+        self.use_next_vision_obs = use_next_vision_obs
         self.gamma = gamma
         self.n_steps = n_steps
         self.device = device
@@ -475,6 +483,19 @@ class SequenceReplayBuffer(nn.Module):
                 self.next_critic_observations = torch.zeros(
                     (n_env, buffer_size, n_critic_obs), device=device, dtype=torch.float
                 )
+        if self.use_vision:
+            self.vision_observations = torch.zeros(
+                (n_env, buffer_size // self.vision_update_rate, vision_size[0], vision_size[1], 1),
+                device=device,
+                dtype=torch.float,
+            )
+            if self.use_next_vision_obs:
+                self.next_vision_observations = torch.zeros(
+                    (n_env, buffer_size // self.vision_update_rate, vision_size[0], vision_size[1], 1),
+                    device=device,
+                    dtype=torch.float,
+                )
+
         self.ptr = 0
 
     @torch.no_grad()
@@ -510,6 +531,11 @@ class SequenceReplayBuffer(nn.Module):
                 # Store full critic observations
                 self.critic_observations[:, ptr] = critic_observations
                 self.next_critic_observations[:, ptr] = next_critic_observations
+
+        if self.use_vision:
+            self.vision_observations[:, ptr // self.vision_update_rate] = tensor_dict["vision_observations"]
+            if self.use_next_vision_obs:
+                self.next_vision_observations[:, ptr // self.vision_update_rate] = tensor_dict["next"]["vision_observations"]
         self.ptr += 1
 
     @torch.no_grad()
@@ -583,6 +609,15 @@ class SequenceReplayBuffer(nn.Module):
                 critic_observations = torch.gather(
                     self.critic_observations, 1, critic_obs_indices
                 ).reshape(self.n_env * batch_size, seq_len, self.n_critic_obs)
+
+        if self.use_vision:
+            vision_obs_indices = flat_indices[:, :, None, None].expand(
+                -1, -1, self.vision_size[0], self.vision_size[1],
+            ).unsqueeze(-1) // self.vision_update_rate
+            vision_observations = torch.gather(
+                self.vision_observations, 1, vision_obs_indices
+            ).reshape(self.n_env * batch_size, seq_len, self.vision_size[0], self.vision_size[1], 1)
+
 
         sequence_dones = torch.gather(
             self.dones.unsqueeze(-1).expand(-1, -1, seq_len), 1, seq_indices
@@ -713,6 +748,14 @@ class SequenceReplayBuffer(nn.Module):
                     self.n_env * batch_size, seq_len, self.n_critic_obs
                 )
 
+        if self.use_vision and self.use_next_vision_obs:
+            next_vision_obs_indices = final_next_obs_indices[:, :, None, None].expand(
+                -1, -1, self.vision_size[0], self.vision_size[1],
+            ).unsqueeze(-1) // self.vision_update_rate
+            next_vision_observations = torch.gather(
+                self.next_vision_observations, 1, next_vision_obs_indices
+            ).reshape(self.n_env * batch_size, seq_len, self.vision_size[0], self.vision_size[1], 1)
+
         # Reshape everything to batch dimension
         rewards = n_step_rewards.reshape(self.n_env * batch_size, seq_len)
         dones = final_dones.reshape(self.n_env * batch_size, seq_len)
@@ -740,6 +783,11 @@ class SequenceReplayBuffer(nn.Module):
         if self.asymmetric_obs:
             out["critic_observations"] = critic_observations
             out["next"]["critic_observations"] = next_critic_observations
+
+        if self.use_vision:
+            out["vision_observations"] = vision_observations
+            if self.use_next_vision_obs:
+                out["next"]["vision_observations"] = next_vision_observations
 
         if self.n_steps > 1 and self.ptr >= self.buffer_size:
             # Roll back the truncation flags introduced for safe sampling

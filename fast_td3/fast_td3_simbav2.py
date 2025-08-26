@@ -409,6 +409,147 @@ class Critic(nn.Module):
         return torch.sum(probs * self.q_support, dim=1)
 
 
+class RNNActor(nn.Module):
+    def __init__(
+        self,
+        n_obs: int,
+        n_act: int,
+        num_envs: int,
+        hidden_dim: int,
+        scaler_init: float,
+        scaler_scale: float,
+        alpha_init: float,
+        alpha_scale: float,
+        expansion: int,
+        c_shift: float,
+        num_blocks: int,
+        std_min: float = 0.05,
+        std_max: float = 0.8,
+        squash: bool = True,
+        noise_scheduling: bool = True,
+        memory_type: str = "gru",
+        memory_hidden_dim: int | None = None,
+        use_vision_latent: bool = False,
+        vision_latent_dim: bool = False,
+        device: torch.device | None = None,
+    ):
+        super().__init__()
+
+        self.use_vision_latent = use_vision_latent
+        if self.use_vision_latent:
+            n_obs += vision_latent_dim
+
+        self.n_obs = n_obs
+        self.n_act = n_act
+
+        if memory_hidden_dim is None:
+            memory_hidden_dim = hidden_dim
+        # memory_hidden_dim = self.n_obs
+        self.memory_hidden_dim = memory_hidden_dim
+        self.memory_type = memory_type
+        if self.memory_type == "gru":
+            self.memory = nn.GRU(self.n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+        elif self.memory_type == "lstm":
+            self.memory = nn.LSTM(self.n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+        else:
+            raise NotImplementedError
+
+        self.embedder = HyperEmbedder(
+            in_dim=memory_hidden_dim,
+            hidden_dim=hidden_dim,
+            scaler_init=scaler_init,
+            scaler_scale=scaler_scale,
+            c_shift=c_shift,
+            device=device,
+        )
+        self.encoder = nn.Sequential(
+            *[
+                HyperLERPBlock(
+                    hidden_dim=hidden_dim,
+                    scaler_init=scaler_init,
+                    scaler_scale=scaler_scale,
+                    alpha_init=alpha_init,
+                    alpha_scale=alpha_scale,
+                    expansion=expansion,
+                    device=device,
+                )
+                for _ in range(num_blocks)
+            ]
+        )
+        self.predictor = HyperTanhPolicy(
+            hidden_dim=hidden_dim,
+            action_dim=n_act,
+            scaler_init=1.0,
+            scaler_scale=1.0,
+            squash=squash,
+            device=device,
+        )
+        self.noise_scheduling = noise_scheduling
+        noise_scales = (
+            torch.rand(num_envs, 1, device=device) * (std_max - std_min) + std_min
+        )
+        self.register_buffer("noise_scales", noise_scales)
+
+        self.register_buffer("std_min", torch.as_tensor(std_min, device=device))
+        self.register_buffer("std_max", torch.as_tensor(std_max, device=device))
+        self.n_envs = num_envs
+        self.device = device
+
+    def forward(
+        self,
+        obs: torch.Tensor,
+        hidden_in: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        vision_latent: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert len(obs.shape) == 3
+        if self.use_vision_latent:
+            if vision_latent is not None:
+                assert len(vision_latent.shape) == 3
+                obs = torch.cat((obs, vision_latent), dim=-1)
+            else:
+                raise NotImplementedError
+        time_latent, hidden_out = self.memory(obs, hidden_in)
+        x = self.embedder(time_latent)
+        x = self.encoder(x)
+        x = self.predictor(x)
+        return x, hidden_out
+
+    def explore(
+        self,
+        obs: torch.Tensor,
+        hidden_in: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        dones: torch.Tensor | None = None,
+        vision_latent: torch.Tensor | None = None,
+        deterministic: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.noise_scheduling:
+            # If dones is provided, resample noise for environments that are done
+            if dones is not None and dones.sum() > 0:
+                # Generate new noise scales for done environments (one per environment)
+                new_scales = (
+                    torch.rand(self.n_envs, 1, device=obs.device)
+                    * (self.std_max - self.std_min)
+                    + self.std_min
+                )
+
+                # Update only the noise scales for environments that are done
+                dones_view = dones.view(-1, 1) > 0
+                self.noise_scales.copy_(
+                    torch.where(dones_view, new_scales, self.noise_scales)
+                )
+
+        obs = obs.unsqueeze(1)
+        if vision_latent is not None:
+            vision_latent = vision_latent.unsqueeze(1)
+        act, hidden_out = self(obs, hidden_in, vision_latent)
+        act = act.squeeze(1)
+        if deterministic:
+            return act, hidden_out
+
+        noise = torch.randn_like(act) * self.noise_scales
+        return act + noise, hidden_out
+
+
 class Actor(nn.Module):
     def __init__(
         self,
@@ -483,20 +624,21 @@ class Actor(nn.Module):
     def explore(
         self, obs: torch.Tensor, dones: torch.Tensor = None, deterministic: bool = False
     ) -> torch.Tensor:
-        # If dones is provided, resample noise for environments that are done
-        # if dones is not None and dones.sum() > 0:
-        #     # Generate new noise scales for done environments (one per environment)
-        #     new_scales = (
-        #         torch.rand(self.n_envs, 1, device=obs.device)
-        #         * (self.std_max - self.std_min)
-        #         + self.std_min
-        #     )
-        #
-        #     # Update only the noise scales for environments that are done
-        #     dones_view = dones.view(-1, 1) > 0
-        #     self.noise_scales.copy_(
-        #         torch.where(dones_view, new_scales, self.noise_scales)
-        #     )
+        if self.noise_scheduling:
+            # If dones is provided, resample noise for environments that are done
+            if dones is not None and dones.sum() > 0:
+                # Generate new noise scales for done environments (one per environment)
+                new_scales = (
+                    torch.rand(self.n_envs, 1, device=obs.device)
+                    * (self.std_max - self.std_min)
+                    + self.std_min
+                )
+
+                # Update only the noise scales for environments that are done
+                dones_view = dones.view(-1, 1) > 0
+                self.noise_scales.copy_(
+                    torch.where(dones_view, new_scales, self.noise_scales)
+                )
 
         act = self(obs)
         if deterministic:
@@ -504,7 +646,6 @@ class Actor(nn.Module):
 
         noise = torch.randn_like(act) * self.noise_scales
         return act + noise
-
 
 class MultiTaskActor(Actor):
     def __init__(self, num_tasks: int, task_embedding_dim: int, *args, **kwargs):

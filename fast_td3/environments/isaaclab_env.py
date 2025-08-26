@@ -18,7 +18,7 @@ class IsaacLabEnv:
     ):
         from isaaclab.app import AppLauncher
 
-        app_launcher = AppLauncher(headless=headless, device=device)
+        app_launcher = AppLauncher(headless=headless, device=device, enable_cameras=False)
         simulation_app = app_launcher.app
 
         import isaaclab_tasks
@@ -51,18 +51,25 @@ class IsaacLabEnv:
             self.num_privileged_obs = 0
         self.num_actions = self.envs.unwrapped.single_action_space.shape[0]
 
-    def reset(self, random_start_init: bool = True) -> torch.Tensor:
-        obs_dict, _ = self.envs.reset()
+    def reset(self, random_start_init: bool = True, vision: bool = False) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        obs_dict, info = self.envs.reset()
         # NOTE: decorrelate episode horizons like RSL‑RL
         if random_start_init:
             self.envs.unwrapped.episode_length_buf = torch.randint_like(
                 self.envs.unwrapped.episode_length_buf, high=int(self.max_episode_steps)
             )
-        return obs_dict["policy"]
+        if vision:
+            return obs_dict["policy"], obs_dict["vision"]
+        else:
+            return obs_dict["policy"]
 
     def reset_with_critic_obs(self) -> tuple[torch.Tensor, torch.Tensor]:
-        obs_dict, _ = self.envs.reset()
+        obs_dict, info = self.envs.reset()
         return obs_dict["policy"], obs_dict["critic"]
+
+    def reset_with_critic_and_vision_obs(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        obs_dict, info = self.envs.reset()
+        return obs_dict["policy"], obs_dict["critic"], obs_dict["vision"]
 
     def step(
         self, actions: torch.Tensor
@@ -73,8 +80,14 @@ class IsaacLabEnv:
         dones = (terminations | truncations).to(dtype=torch.long)
         obs = obs_dict["policy"]
         critic_obs = obs_dict["critic"] if self.asymmetric_obs else None
+
+
         info_ret = {"time_outs": truncations, "observations": {"critic": critic_obs}}
         info_ret["isaaclab"] = infos
+
+        if "vision" in obs_dict.keys():
+            info_ret["observations"]["vision"] = obs_dict["vision"]
+
         # NOTE: There's really no way to get the raw observations from IsaacLab
         # We just use the 'reset_obs' as next_obs, unfortunately.
         # See https://github.com/isaac-sim/IsaacLab/issues/1362
@@ -82,6 +95,8 @@ class IsaacLabEnv:
             "obs": obs,
             "critic_obs": critic_obs,
         }
+        if "vision" in obs_dict.keys():
+            info_ret["observations"]["raw"]["vision_obs"] = obs_dict["vision"]
         return obs, rew, dones, info_ret
 
     def render(self):
