@@ -32,7 +32,7 @@ from torch.amp import autocast, GradScaler
 
 from tensordict import TensorDict, merge_tensordicts, is_tensor_collection
 
-from fast_td3_utils import (
+from fast_td3.fast_td3_utils import (
     EmpiricalNormalization,
     RewardNormalizer,
     PerTaskRewardNormalizer,
@@ -40,8 +40,8 @@ from fast_td3_utils import (
     save_params,
     mark_step,
 )
-from hyperparams import get_args, BaseArgs
-from vision_backbone import DepthOnlyFCBackbone58x87
+from fast_td3.hyperparams import get_args, BaseArgs
+from fast_td3.vision_backbone import DepthOnlyFCBackbone58x87
 
 torch.set_float32_matmul_precision("high")
 
@@ -91,7 +91,7 @@ def main():
     print(f"Using device: {device}")
 
     if args.env_name.startswith("h1hand-") or args.env_name.startswith("h1-"):
-        from environments.humanoid_bench_env import HumanoidBenchEnv
+        from fast_td3.environments.humanoid_bench_env import HumanoidBenchEnv
 
         env_type = "humanoid_bench"
         envs = HumanoidBenchEnv(args.env_name, args.num_envs, device=device)
@@ -100,7 +100,7 @@ def main():
             args.env_name, 1, render_mode="rgb_array", device=device
         )
     elif args.env_name.startswith("Isaac-") or args.env_name.startswith("Unitree-"):
-        from environments.isaaclab_env import IsaacLabEnv
+        from fast_td3.environments.isaaclab_env import IsaacLabEnv
 
         env_type = "isaaclab"
         envs = IsaacLabEnv(
@@ -113,7 +113,7 @@ def main():
         eval_envs = envs
         render_env = envs
     elif args.env_name.startswith("MTBench-"):
-        from environments.mtbench_env import MTBenchEnv
+        from fast_td3.environments.mtbench_env import MTBenchEnv
 
         env_name = "-".join(args.env_name.split("-")[1:])
         env_type = "mtbench"
@@ -216,7 +216,7 @@ def main():
             actor_cls = MultiTaskActor
             critic_cls = MultiTaskCritic
         else:
-            from fast_td3 import RNNActor, Critic
+            from fast_td3.fast_td3 import RNNActor, Critic
 
             actor_cls = RNNActor
             critic_cls = Critic
@@ -224,12 +224,13 @@ def main():
         print("Using FastTD3")
     elif args.agent == "fasttd3_simbav2":
         if env_type in ["mtbench"]:
-            from fast_td3_simbav2 import MultiTaskActor, MultiTaskCritic
+            raise NotImplementedError
+            from fast_td3.fast_td3_simbav2 import MultiTaskActor, MultiTaskCritic
 
             actor_cls = MultiTaskActor
             critic_cls = MultiTaskCritic
         else:
-            from fast_td3_simbav2 import RNNActor, Critic
+            from fast_td3.fast_td3_simbav2 import RNNActor, Critic
 
             actor_cls = RNNActor
             critic_cls = Critic
@@ -272,10 +273,11 @@ def main():
     else:
         from tensordict import from_module
 
-        actor_detach = actor_cls(**actor_kwargs)
+        # actor_detach = actor_cls(**actor_kwargs)
         # Copy params to actor_detach without grad
-        from_module(actor).data.to_module(actor_detach)
-        policy = actor_detach.explore
+        # from_module(actor).data.to_module(actor_detach)
+        # policy = actor_detach.explore
+        # policy = actor.explore
 
     qnet = critic_cls(**critic_kwargs)
     qnet_target = critic_cls(**critic_kwargs)
@@ -679,7 +681,11 @@ def main():
                 if args.use_vision:
                     vision_observations = data["vision_observations"]
                     flat_vision_observations = vision_observations.view(-1, args.vision_input_width, args.vision_input_height, 1)
-                    vision_latent = vision_nn(flat_vision_observations.permute(0, 3, 1, 2)).reshape(-1, seq_len + args.memory_burnin, args.vision_latent_dim)
+                    vision_latent = vision_nn(
+                        flat_vision_observations.permute(0, 3, 1, 2),
+                        augment=args.use_vision_augmentation,
+
+                    ).reshape(-1, seq_len + args.memory_burnin, args.vision_latent_dim)
                 else:
                     vision_latent = None
 
@@ -753,12 +759,14 @@ def main():
         compile_mode = args.compile_mode
         update_main = torch.compile(update_main, mode=compile_mode)
         update_pol = torch.compile(update_pol, mode=compile_mode)
-        policy = torch.compile(policy, mode=None)
+        # policy = torch.compile(policy, mode=None)
         normalize_obs = torch.compile(obs_normalizer.forward, mode=None)
         normalize_critic_obs = torch.compile(critic_obs_normalizer.forward, mode=None)
         if args.reward_normalization:
             update_stats = torch.compile(reward_normalizer.update_stats, mode=None)
         normalize_reward = torch.compile(reward_normalizer.forward, mode=None)
+        if args.use_vision:
+            vision_nn = torch.compile(vision_nn, mode=None)
     else:
         normalize_obs = obs_normalizer.forward
         normalize_critic_obs = critic_obs_normalizer.forward
@@ -811,6 +819,9 @@ def main():
     else:
         raise NotImplementedError
 
+    # dummy_in = torch.zeros((1, n_obs)).to(device)
+    # dummy_vision_in = torch.zeros((1, args.vision_latent_dim)).to(device)
+    # dummy_hidden_in = torch.zeros((1, 1, args.memory_hidden_dim)).to(device)
     while global_step < args.total_timesteps:
         mark_step()
         logs_dict = TensorDict()
@@ -830,7 +841,7 @@ def main():
             else:
                 explore_vision_latent = None
 
-            actions, explore_hidden_out = policy(
+            actions, explore_hidden_out = actor.explore(
                 obs=norm_obs,
                 hidden_in=explore_hidden_in,
                 vision_latent=explore_vision_latent,
@@ -923,8 +934,9 @@ def main():
                 soft_update(qnet, qnet_target, args.tau)
 
 
-            from_module(actor).data.to_module(actor_detach)
-            policy = actor_detach.explore
+            # if args.update_exploration_policy:
+            #     from_module(actor).data.to_module(actor_detach)
+            #     policy = actor_detach.explore
 
             if global_step % 100 == 0 and start_time is not None:
                 speed = (global_step - measure_burnin) / (time.time() - start_time)
@@ -996,6 +1008,7 @@ def main():
                     critic_obs_normalizer,
                     args,
                     f"models/{run_name}_{global_step}.pt",
+                    vision_model=vision_nn if args.use_vision else None,
                 )
 
         global_step += 1
@@ -1021,6 +1034,7 @@ def main():
         critic_obs_normalizer,
         args,
         f"models/{run_name}_final.pt",
+        vision_model=vision_nn if args.use_vision else None,
     )
 
 

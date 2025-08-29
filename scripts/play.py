@@ -1,6 +1,7 @@
 import os
 import sys
 
+
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 if sys.platform != "darwin":
@@ -42,6 +43,7 @@ from fast_td3.fast_td3_utils import (
 )
 from fast_td3.fast_td3_deploy import load_policy
 from fast_td3.hyperparams import get_args
+from fast_td3.vision_backbone import DepthOnlyFCBackbone58x87
 
 torch.set_float32_matmul_precision("high")
 
@@ -119,70 +121,7 @@ def main():
             use_push_randomization=args.use_push_randomization,
         )
 
-    n_act = envs.num_actions
-    n_obs = envs.num_obs if type(envs.num_obs) == int else envs.num_obs[0]
-    if envs.asymmetric_obs:
-        n_critic_obs = (
-            envs.num_privileged_obs
-            if type(envs.num_privileged_obs) == int
-            else envs.num_privileged_obs[0]
-        )
-    else:
-        n_critic_obs = n_obs
-
-    if args.obs_normalization:
-        obs_normalizer = EmpiricalNormalization(shape=n_obs, device=device)
-        critic_obs_normalizer = EmpiricalNormalization(
-            shape=n_critic_obs, device=device
-        )
-    else:
-        obs_normalizer = nn.Identity()
-        critic_obs_normalizer = nn.Identity()
-
-    if args.reward_normalization:
-        if env_type in ["mtbench"]:
-            reward_normalizer = PerTaskRewardNormalizer(
-                num_tasks=envs.num_tasks,
-                gamma=args.gamma,
-                device=device,
-                g_max=min(abs(args.v_min), abs(args.v_max)),
-            )
-        else:
-            reward_normalizer = RewardNormalizer(
-                gamma=args.gamma,
-                device=device,
-                g_max=min(abs(args.v_min), abs(args.v_max)),
-            )
-    else:
-        reward_normalizer = nn.Identity()
-
-    actor_kwargs = {
-        "n_obs": n_obs,
-        "n_act": n_act,
-        "num_envs": args.num_envs,
-        "device": device,
-        "init_scale": args.init_scale,
-        "hidden_dim": args.actor_hidden_dim,
-    }
-    critic_kwargs = {
-        "n_obs": n_critic_obs,
-        "n_act": n_act,
-        "num_atoms": args.num_atoms,
-        "v_min": args.v_min,
-        "v_max": args.v_max,
-        "hidden_dim": args.critic_hidden_dim,
-        "device": device,
-    }
-
-    if env_type == "mtbench":
-        actor_kwargs["n_obs"] = n_obs - envs.num_tasks + args.task_embedding_dim
-        critic_kwargs["n_obs"] = n_critic_obs - envs.num_tasks + args.task_embedding_dim
-        actor_kwargs["num_tasks"] = envs.num_tasks
-        actor_kwargs["task_embedding_dim"] = args.task_embedding_dim
-        critic_kwargs["num_tasks"] = envs.num_tasks
-        critic_kwargs["task_embedding_dim"] = args.task_embedding_dim
-
-    policy = load_policy(args.checkpoint_path).to(device)
+    policy = load_policy(args.checkpoint_path, use_memory=True).to(device)
 
     if envs.asymmetric_obs:
         obs, critic_obs = envs.reset_with_critic_obs()
@@ -192,14 +131,11 @@ def main():
 
     global_step = 0
 
-    dones = None
-    start_time = None
-
     while global_step < args.total_timesteps:
         with torch.no_grad():
             actions = policy(obs)
 
-        next_obs, rewards, dones, infos = envs.step(actions.float())
+        obs, rewards, dones, infos = envs.step(actions.float())
         truncations = infos["time_outs"]
 
 if __name__ == "__main__":

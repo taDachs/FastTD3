@@ -134,10 +134,15 @@ class BaseArgs:
     save_interval: int = 5000
     """the interval to save the model"""
 
+    update_exploration_policy: bool = True
+    """If true, updates the exploration policy every step"""
+
     teacher_obs_path: str | None = None
     """path to tensordict containing teacher observations"""
     use_vision: bool = False
     """if true, uses vision model"""
+    use_vision_augmentation: bool = False
+    """if true, augments training images"""
     vision_input_width: int = 48
     """input image width"""
     vision_input_height: int = 48
@@ -566,6 +571,7 @@ class IsaacReposeCubeShadowDirectArgs(IsaacLabArgs):
 class UnitreeGo2VelocityArgs(IsaacLabArgs):
     env_name: str = "Unitree-Go2-Velocity"
     total_timesteps: int = 100000
+    eval_interval: int = 0
 
     # my adjustments:
     action_low: float = -100.0
@@ -591,6 +597,7 @@ class UnitreeGo2VelocityArgs(IsaacLabArgs):
 class UnitreeGo2ParkourStudentArgs(IsaacLabArgs):
     env_name: str = "Unitree-Go2-Parkour-Student"
     total_timesteps: int = 100000
+    eval_interval: int = 0
 
     use_vision: bool = True
     vision_latent_dim: int = 128

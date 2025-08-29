@@ -32,7 +32,7 @@ from torch.amp import autocast, GradScaler
 
 from tensordict import TensorDict, merge_tensordicts, is_tensor_collection
 
-from fast_td3_utils import (
+from fast_td3.fast_td3_utils import (
     EmpiricalNormalization,
     RewardNormalizer,
     PerTaskRewardNormalizer,
@@ -40,7 +40,7 @@ from fast_td3_utils import (
     save_params,
     mark_step,
 )
-from hyperparams import get_args
+from fast_td3.hyperparams import get_args
 
 torch.set_float32_matmul_precision("high")
 
@@ -90,7 +90,7 @@ def main():
     print(f"Using device: {device}")
 
     if args.env_name.startswith("h1hand-") or args.env_name.startswith("h1-"):
-        from environments.humanoid_bench_env import HumanoidBenchEnv
+        from fast_td3.environments.humanoid_bench_env import HumanoidBenchEnv
 
         env_type = "humanoid_bench"
         envs = HumanoidBenchEnv(args.env_name, args.num_envs, device=device)
@@ -99,7 +99,7 @@ def main():
             args.env_name, 1, render_mode="rgb_array", device=device
         )
     elif args.env_name.startswith("Isaac-") or args.env_name.startswith("Unitree-"):
-        from environments.isaaclab_env import IsaacLabEnv
+        from fast_td3.environments.isaaclab_env import IsaacLabEnv
 
         env_type = "isaaclab"
         envs = IsaacLabEnv(
@@ -112,7 +112,7 @@ def main():
         eval_envs = envs
         render_env = envs
     elif args.env_name.startswith("MTBench-"):
-        from environments.mtbench_env import MTBenchEnv
+        from fast_td3.environments.mtbench_env import MTBenchEnv
 
         env_name = "-".join(args.env_name.split("-")[1:])
         env_type = "mtbench"
@@ -120,7 +120,7 @@ def main():
         eval_envs = envs
         render_env = envs
     else:
-        from environments.mujoco_playground_env import make_env
+        from fast_td3.environments.mujoco_playground_env import make_env
 
         # TODO: Check if re-using same envs for eval could reduce memory usage
         env_type = "mujoco_playground"
@@ -205,12 +205,12 @@ def main():
 
     if args.agent == "fasttd3":
         if env_type in ["mtbench"]:
-            from fast_td3 import MultiTaskActor, MultiTaskCritic
+            from fast_td3.fast_td3 import MultiTaskActor, MultiTaskCritic
 
             actor_cls = MultiTaskActor
             critic_cls = MultiTaskCritic
         else:
-            from fast_td3 import Actor, Critic
+            from fast_td3.fast_td3 import Actor, Critic
 
             actor_cls = Actor
             critic_cls = Critic
@@ -218,12 +218,12 @@ def main():
         print("Using FastTD3")
     elif args.agent == "fasttd3_simbav2":
         if env_type in ["mtbench"]:
-            from fast_td3_simbav2 import MultiTaskActor, MultiTaskCritic
+            from fast_td3.fast_td3_simbav2 import MultiTaskActor, MultiTaskCritic
 
             actor_cls = MultiTaskActor
             critic_cls = MultiTaskCritic
         else:
-            from fast_td3_simbav2 import Actor, Critic
+            from fast_td3.fast_td3_simbav2 import Actor, Critic
 
             actor_cls = Actor
             critic_cls = Critic
@@ -588,6 +588,8 @@ def main():
     cumulative_rewards = torch.zeros(args.num_envs, device=device)
     episode_lengths = torch.zeros(args.num_envs, device=device)
     episode_returns = torch.zeros(args.num_envs, device=device)
+    dummy_in = torch.zeros((1, n_obs)).to(device)
+    dummy_out_before = policy(dummy_in, deterministic=True)
     while global_step < args.total_timesteps:
         mark_step()
         logs_dict = TensorDict()
@@ -710,6 +712,11 @@ def main():
                         logs_dict = update_pol(data, logs_dict)
 
                 soft_update(qnet, qnet_target, args.tau)
+
+            if args.update_exploration_policy:
+                # from_module(actor).data.to_module(actor_detach)
+                # policy = actor_detach.explore
+                print(actor_detach.net[0].weight)
 
             if global_step % 100 == 0 and start_time is not None:
                 speed = (global_step - measure_burnin) / (time.time() - start_time)
