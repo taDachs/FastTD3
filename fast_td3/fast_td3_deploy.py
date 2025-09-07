@@ -38,6 +38,8 @@ class Policy(nn.Module):
             device="cpu",
             init_scale=init_scale,
             hidden_dim=actor_hidden_dim,
+            squash=args["squash"],
+            noise_scheduling=args["noise_scheduling"],
         )
 
         if self.use_memory:
@@ -45,7 +47,7 @@ class Policy(nn.Module):
             actor_kwargs["memory_hidden_dim"] = args["memory_hidden_dim"]
 
         if self.use_vision:
-            actor_kwargs["use_vision_latent"] = args["use_vision_latent"]
+            actor_kwargs["use_vision_latent"] = args["use_vision"]
             actor_kwargs["vision_latent_dim"] = args["vision_latent_dim"]
 
 
@@ -80,7 +82,7 @@ class Policy(nn.Module):
         self.actor = actor_cls(
             **actor_kwargs,
         )
-        if self.ues_vision:
+        if self.use_vision:
             self.vision_nn = DepthOnlyFCBackbone58x87(args["vision_latent_dim"])
         self.obs_normalizer = EmpiricalNormalization(shape=n_obs, device="cpu")
 
@@ -97,10 +99,14 @@ class Policy(nn.Module):
         norm_obs = self.obs_normalizer(obs)
         if self.use_memory:
             if self.use_vision:
-                vision_latent = self.vision_nn(image)
+                vision_latent = self.vision_nn(image.permute(0, 3, 1, 2) / self.args["normalize_vision_scalar"])
+                vision_latent = vision_latent.unsqueeze(1)
             else:
                 vision_latent = None
-            actions, hidden_out = self.actor(norm_obs, hidden_in, vision_latent)
+            norm_obs = norm_obs.unsqueeze(1)
+            actions, hidden_out = self.actor(norm_obs, hidden_in=hidden_in, vision_latent=vision_latent)
+            actions = actions.squeeze(1)
+
             return actions, hidden_out
         else:
             actions = self.actor(norm_obs)
@@ -115,13 +121,21 @@ def load_policy(checkpoint_path, use_memory):
 
     agent = args.get("agent", "fasttd3")
     if agent == "fasttd3":
-        n_obs = torch_checkpoint["actor_state_dict"]["net.0.weight"].shape[-1]
+        if use_memory:
+            n_obs = torch_checkpoint["actor_state_dict"]["memory.weight_ih_l0"].shape[-1]
+            if args["use_vision"]:
+                n_obs -= args["vision_latent_dim"]
+        else:
+            n_obs = torch_checkpoint["actor_state_dict"]["net.0.weight"].shape[-1]
         n_act = torch_checkpoint["actor_state_dict"]["fc_mu.0.weight"].shape[0]
     elif agent == "fasttd3_simbav2":
         # TODO: Too hard-coded, maybe save n_obs and n_act in the checkpoint?
-        n_obs = (
-            torch_checkpoint["actor_state_dict"]["embedder.w.w.weight"].shape[-1] - 1
-        )
+        if use_memory:
+            n_obs = torch_checkpoint["actor_state_dict"]["memory.weight_ih_l0"].shape[-1]
+        else:
+            n_obs = (
+                torch_checkpoint["actor_state_dict"]["embedder.w.w.weight"].shape[-1] - 1
+            )
         n_act = torch_checkpoint["actor_state_dict"]["predictor.mean_bias"].shape[0]
     else:
         raise ValueError(f"Agent {agent} not supported")
@@ -134,6 +148,16 @@ def load_policy(checkpoint_path, use_memory):
         agent=agent,
     )
     policy.actor.load_state_dict(torch_checkpoint["actor_state_dict"])
+    if args["use_vision"]:
+        cleaned_state_dict = {}
+        bad_name = "_orig_mod."
+
+        for k, v in torch_checkpoint["vision_model"].items():
+            if bad_name in k:
+                cleaned_state_dict[k[len(bad_name):]] = v
+            else:
+                cleaned_state_dict[k] = v
+        policy.vision_nn.load_state_dict(cleaned_state_dict)
 
     if len(torch_checkpoint["obs_normalizer_state"]) == 0:
         policy.obs_normalizer = nn.Identity()

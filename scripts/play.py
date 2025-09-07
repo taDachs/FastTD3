@@ -77,39 +77,28 @@ def main():
     if args.env_name.startswith("h1hand-") or args.env_name.startswith("h1-"):
         from fast_td3.environments.humanoid_bench_env import HumanoidBenchEnv
 
-        env_type = "humanoid_bench"
         envs = HumanoidBenchEnv(args.env_name, args.num_envs, device=device)
-        eval_envs = envs
-        render_env = HumanoidBenchEnv(
-            args.env_name, 1, render_mode="rgb_array", device=device
-        )
     elif args.env_name.startswith("Isaac-") or args.env_name.startswith("Unitree-"):
         from fast_td3.environments.isaaclab_env import IsaacLabEnv
 
-        env_type = "isaaclab"
+        print("actions bounds: ", args.action_bounds)
         envs = IsaacLabEnv(
             args.env_name,
             device.type,
             args.num_envs,
             args.seed,
-            action_bounds=args.action_bounds,
+            action_bounds=args.action_bounds if args.squash else None,
             headless=False,
         )
-        eval_envs = envs
-        render_env = envs
     elif args.env_name.startswith("MTBench-"):
         from fast_td3.environments.mtbench_env import MTBenchEnv
 
         env_name = "-".join(args.env_name.split("-")[1:])
-        env_type = "mtbench"
         envs = MTBenchEnv(env_name, args.device_rank, args.num_envs, args.seed)
-        eval_envs = envs
-        render_env = envs
     else:
         from fast_td3.environments.mujoco_playground_env import make_env
 
         # TODO: Check if re-using same envs for eval could reduce memory usage
-        env_type = "mujoco_playground"
         envs, eval_envs, render_env = make_env(
             args.env_name,
             args.seed,
@@ -124,19 +113,30 @@ def main():
     policy = load_policy(args.checkpoint_path, use_memory=True).to(device)
 
     if envs.asymmetric_obs:
-        obs, critic_obs = envs.reset_with_critic_obs()
-        critic_obs = torch.as_tensor(critic_obs, device=device, dtype=torch.float)
+        if args.use_vision:
+            obs, critic_obs, vision_obs = envs.reset_with_critic_and_vision_obs()
+            critic_obs = torch.as_tensor(critic_obs, device=device, dtype=torch.float)
+            vision_obs = torch.as_tensor(vision_obs, device=device, dtype=torch.float)
+        else:
+            vision_obs = None
+            obs, critic_obs = envs.reset_with_critic_obs()
+            critic_obs = torch.as_tensor(critic_obs, device=device, dtype=torch.float)
     else:
         obs = envs.reset()
 
+
     global_step = 0
 
+    memory_hidden_in = torch.zeros((1, args.num_envs, args.memory_hidden_dim)).to(device)
     while global_step < args.total_timesteps:
         with torch.no_grad():
-            actions = policy(obs)
+            actions, memory_hidden_out = policy(obs, memory_hidden_in, image=vision_obs)
 
-        obs, rewards, dones, infos = envs.step(actions.float())
-        truncations = infos["time_outs"]
+        obs, _, dones, infos = envs.step(actions.float())
+        memory_hidden_in = memory_hidden_out
+        if args.use_vision:
+            vision_obs = infos["observations"]["vision"]
+        memory_hidden_in[:, dones == 1] = 0.0
 
 if __name__ == "__main__":
     main()

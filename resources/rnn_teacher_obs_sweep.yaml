@@ -13,7 +13,7 @@ parameters:
   total_timesteps:
     value: 15000
   teacher_obs_path:
-    values: "../../stored_transitions"
+    value: "../../stored_transitions_goal_pose"
 
   num_envs:
     values: [512, 1024, 2048, 4096]
@@ -22,6 +22,8 @@ parameters:
   batch_size:
     values: [10000, 20000, 32768]
   memory_hidden_dim:
+    values: [128, 256, 512, 1024]
+  vision_latent_dim:
     values: [128, 256, 512, 1024]
   use_grad_norm_clipping:
     values: [true, false]

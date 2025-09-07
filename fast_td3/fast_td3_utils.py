@@ -540,7 +540,11 @@ class SequenceReplayBuffer(nn.Module):
 
     @torch.no_grad()
     def sample(self, batch_size: int, seq_len: int):
-        # we will sample n_env * batch_size * seq_len transitions
+        num_seqs_sampled = batch_size // seq_len
+        num_envs_sampled = min(num_seqs_sampled, self.n_env)
+        num_seqs_per_env = max(num_seqs_sampled // num_envs_sampled, 1)
+
+        # we will sample n_env * num_seqs_per_env * seq_len transitions
         # Sample base indices
         if self.ptr >= self.buffer_size:
             # When the buffer is full, there is no protection against sampling across different episodes
@@ -555,7 +559,7 @@ class SequenceReplayBuffer(nn.Module):
             start_indices = torch.randint(
                 0,
                 self.buffer_size,
-                (self.n_env, batch_size),
+                (num_envs_sampled, num_seqs_per_env),
                 device=self.device,
             )
         else:
@@ -564,28 +568,28 @@ class SequenceReplayBuffer(nn.Module):
             start_indices = torch.randint(
                 0,
                 max_start_idx,
-                (self.n_env, batch_size),
+                (num_envs_sampled, num_seqs_per_env),
                 device=self.device,
             )
 
         # Create sequential indices for each sample
-        # This creates a [n_env, batch_size, seq_len] tensor of indices
+        # This creates a [n_env, num_seqs_per_env, seq_len] tensor of indices
         seq_offsets = torch.arange(seq_len, device=self.device).view(1, 1, -1)
         seq_indices = (
             start_indices.unsqueeze(-1) + seq_offsets
-        ) % self.buffer_size  # [n_env, batch_size, seq_len]
+        ) % self.buffer_size  # [n_env, num_seqs_per_env, seq_len]
 
-        flat_indices = seq_indices.view(self.n_env, -1)
+        flat_indices = seq_indices.view(num_envs_sampled, -1)
 
         obs_indices = flat_indices.unsqueeze(-1).expand(-1, -1, self.n_obs)
         act_indices = flat_indices.unsqueeze(-1).expand(-1, -1, self.n_act)
 
         # Get base transitions
         observations = torch.gather(self.observations, 1, obs_indices).reshape(
-            self.n_env * batch_size, seq_len, self.n_obs
+            num_envs_sampled * num_seqs_per_env, seq_len, self.n_obs
         )
         actions = torch.gather(self.actions, 1, act_indices).reshape(
-            self.n_env * batch_size, seq_len, self.n_act
+            num_envs_sampled * num_seqs_per_env, seq_len, self.n_act
         )
         if self.asymmetric_obs:
             if self.playground_mode:
@@ -595,7 +599,7 @@ class SequenceReplayBuffer(nn.Module):
                 )
                 privileged_observations = torch.gather(
                     self.privileged_observations, 1, priv_obs_indices
-                ).reshape(self.n_env * batch_size, seq_len, self.privileged_obs_size)
+                ).reshape(num_envs_sampled * num_seqs_per_env, seq_len, self.privileged_obs_size)
 
                 # Concatenate with regular observations to form full critic observations
                 critic_observations = torch.cat(
@@ -608,7 +612,7 @@ class SequenceReplayBuffer(nn.Module):
                 )
                 critic_observations = torch.gather(
                     self.critic_observations, 1, critic_obs_indices
-                ).reshape(self.n_env * batch_size, seq_len, self.n_critic_obs)
+                ).reshape(num_envs_sampled * num_seqs_per_env, seq_len, self.n_critic_obs)
 
         if self.use_vision:
             vision_obs_indices = flat_indices[:, :, None, None].expand(
@@ -616,7 +620,7 @@ class SequenceReplayBuffer(nn.Module):
             ).unsqueeze(-1) // self.vision_update_rate
             vision_observations = torch.gather(
                 self.vision_observations, 1, vision_obs_indices
-            ).reshape(self.n_env * batch_size, seq_len, self.vision_size[0], self.vision_size[1], 1)
+            ).reshape(num_envs_sampled * num_seqs_per_env, seq_len, self.vision_size[0], self.vision_size[1], 1)
 
 
         sequence_dones = torch.gather(
@@ -627,14 +631,14 @@ class SequenceReplayBuffer(nn.Module):
         )  # First reward should not be masked
         sequence_done_masks = torch.cumprod(
             1 - sequence_dones_shifted, dim=2
-        ).reshape(self.n_env * batch_size, seq_len)
+        ).reshape(num_envs_sampled * num_seqs_per_env, seq_len)
 
         # Gather all rewards and terminal flags
-        # Using advanced indexing - result shapes: [n_env, batch_size, n_step]
+        # Using advanced indexing - result shapes: [n_env, num_seqs_per_env, n_step]
         n_step_offsets = torch.arange(self.n_steps, device=self.device).view(1, 1, -1)
         n_step_indices = (
             flat_indices.unsqueeze(-1) + n_step_offsets
-        ) % self.buffer_size  # [n_env, batch_size, n_step]
+        ) % self.buffer_size  # [n_env, num_seqs_per_env, n_step]
 
         all_rewards = torch.gather(
             self.rewards.unsqueeze(-1).expand(-1, -1, self.n_steps), 1, n_step_indices
@@ -655,7 +659,7 @@ class SequenceReplayBuffer(nn.Module):
         )  # First reward should not be masked
         n_step_done_masks = torch.cumprod(
             1.0 - all_dones_shifted, dim=2
-        )  # [n_env, batch_size, n_step]
+        )  # [n_env, num_seqs_per_env, n_step]
         effective_n_steps = n_step_done_masks.sum(2)
 
         # Create discount factors
@@ -664,21 +668,21 @@ class SequenceReplayBuffer(nn.Module):
         )  # [n_steps]
 
         # Apply masks and discounts to rewards
-        masked_rewards = all_rewards * n_step_done_masks  # [n_env, batch_size, n_step]
+        masked_rewards = all_rewards * n_step_done_masks  # [n_env, num_seqs_per_env, n_step]
         discounted_rewards = masked_rewards * discounts.view(
             1, 1, -1
-        )  # [n_env, batch_size, n_step]
+        )  # [n_env, num_seqs_per_env, n_step]
 
         # Sum rewards along the n_step dimension
-        n_step_rewards = discounted_rewards.sum(dim=2)  # [n_env, batch_size]
+        n_step_rewards = discounted_rewards.sum(dim=2)  # [n_env, num_seqs_per_env]
 
         # Find index of first done or truncation or last step for each sequence
         first_done = torch.argmax(
             (all_dones > 0).float(), dim=2
-        )  # [n_env, batch_size]
+        )  # [n_env, num_seqs_per_env]
         first_trunc = torch.argmax(
             (all_truncations > 0).float(), dim=2
-        )  # [n_env, batch_size]
+        )  # [n_env, num_seqs_per_env]
 
         # Handle case where there are no dones or truncations
         no_dones = all_dones.sum(dim=2) == 0
@@ -691,14 +695,14 @@ class SequenceReplayBuffer(nn.Module):
         # Take the minimum (first) of done or truncation
         final_indices = torch.minimum(
             first_done, first_trunc
-        )  # [n_env, batch_size]
+        )  # [n_env, num_seqs_per_env]
 
         # Create indices to gather the final next observations
         final_next_obs_indices = torch.gather(
             n_step_indices, 2, final_indices.unsqueeze(-1)
         ).squeeze(
             -1
-        )  # [n_env, batch_size]
+        )  # [n_env, num_seqs_per_env]
 
         # Gather final values
         final_next_observations = self.next_observations.gather(
@@ -722,13 +726,13 @@ class SequenceReplayBuffer(nn.Module):
                 # Reshape for output
                 next_privileged_observations = (
                     final_next_privileged_observations.reshape(
-                        self.n_env * batch_size, self.privileged_obs_size
+                        num_envs_sampled * num_seqs_per_env, self.privileged_obs_size
                     )
                 )
 
                 # Concatenate with next observations to form full next critic observations
                 next_observations_reshaped = final_next_observations.reshape(
-                    self.n_env * batch_size, self.n_obs
+                    num_envs_sampled * num_seqs_per_env, self.n_obs
                 )
                 next_critic_observations = torch.cat(
                     [next_observations_reshaped, next_privileged_observations],
@@ -745,7 +749,7 @@ class SequenceReplayBuffer(nn.Module):
                     )
                 )
                 next_critic_observations = final_next_critic_observations.reshape(
-                    self.n_env * batch_size, seq_len, self.n_critic_obs
+                    num_envs_sampled * num_seqs_per_env, seq_len, self.n_critic_obs
                 )
 
         if self.use_vision and self.use_next_vision_obs:
@@ -754,15 +758,15 @@ class SequenceReplayBuffer(nn.Module):
             ).unsqueeze(-1) // self.vision_update_rate
             next_vision_observations = torch.gather(
                 self.next_vision_observations, 1, next_vision_obs_indices
-            ).reshape(self.n_env * batch_size, seq_len, self.vision_size[0], self.vision_size[1], 1)
+            ).reshape(num_envs_sampled * num_seqs_per_env, seq_len, self.vision_size[0], self.vision_size[1], 1)
 
         # Reshape everything to batch dimension
-        rewards = n_step_rewards.reshape(self.n_env * batch_size, seq_len)
-        dones = final_dones.reshape(self.n_env * batch_size, seq_len)
-        truncations = final_truncations.reshape(self.n_env * batch_size, seq_len)
-        effective_n_steps = effective_n_steps.reshape(self.n_env * batch_size, seq_len)
+        rewards = n_step_rewards.reshape(num_envs_sampled * num_seqs_per_env, seq_len)
+        dones = final_dones.reshape(num_envs_sampled * num_seqs_per_env, seq_len)
+        truncations = final_truncations.reshape(num_envs_sampled * num_seqs_per_env, seq_len)
+        effective_n_steps = effective_n_steps.reshape(num_envs_sampled * num_seqs_per_env, seq_len)
         next_observations = final_next_observations.reshape(
-            self.n_env * batch_size, seq_len, self.n_obs
+            num_envs_sampled * num_seqs_per_env, seq_len, self.n_obs
         )
 
         out = TensorDict(
@@ -778,7 +782,7 @@ class SequenceReplayBuffer(nn.Module):
                     "effective_n_steps": effective_n_steps,
                 },
             },
-            batch_size=self.n_env * batch_size,
+            batch_size=num_envs_sampled * num_seqs_per_env,
         )
         if self.asymmetric_obs:
             out["critic_observations"] = critic_observations
@@ -1186,7 +1190,7 @@ def save_params(
         "global_step": global_step,
     }
     if vision_model is not None:
-        save_dict["vision_model"] = vision_model
+        save_dict["vision_model"] = cpu_state(get_ddp_state_dict(vision_model))
     torch.save(save_dict, save_path, _use_new_zipfile_serialization=True)
     print(f"Saved parameters and configuration to {save_path}")
 

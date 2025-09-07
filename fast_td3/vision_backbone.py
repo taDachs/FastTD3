@@ -52,7 +52,8 @@ class DepthOnlyFCBackbone58x87(nn.Module):
     def __init__(self, output_dim: int):
         super().__init__()
 
-        activation = nn.ELU()
+        # activation = nn.ELU()
+        activation = nn.Tanh()
         self.image_compression = nn.Sequential(
             nn.Conv2d(1, 16, 5), nn.LeakyReLU(), nn.MaxPool2d(2),
             nn.Conv2d(16, 32, 4), nn.LeakyReLU(), nn.MaxPool2d(2),
@@ -67,6 +68,7 @@ class DepthOnlyFCBackbone58x87(nn.Module):
 
     def forward(self, vobs, augment=False, hist=False):
         bs, c, w, h = vobs.size()
+        assert c == 1
 
         vobs = vobs.view(-1, 1, w, h)
         if augment:

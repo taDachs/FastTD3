@@ -109,6 +109,7 @@ def main():
             args.num_envs,
             args.seed,
             action_bounds=args.action_bounds if args.squash else None,
+            headless=True,
         )
         eval_envs = envs
         render_env = envs
@@ -273,11 +274,10 @@ def main():
     else:
         from tensordict import from_module
 
-        # actor_detach = actor_cls(**actor_kwargs)
+        actor_detach = actor_cls(**actor_kwargs)
         # Copy params to actor_detach without grad
-        # from_module(actor).data.to_module(actor_detach)
-        # policy = actor_detach.explore
-        # policy = actor.explore
+        from_module(actor).data.to_module(actor_detach)
+        policy = actor_detach.explore
 
     qnet = critic_cls(**critic_kwargs)
     qnet_target = critic_cls(**critic_kwargs)
@@ -369,10 +369,12 @@ def main():
     def sample_batch(seq_len: int):
         if args.teacher_obs_path:
             half_batch = args.batch_size // 2
-            teacher_batch_size = max(half_batch // (teacher_rb.n_env * seq_len), 1)
-            student_batch_size = max(half_batch // (args.num_envs * seq_len), 1)
+            teacher_batch_size = half_batch
+            student_batch_size = half_batch
             teacher_data = teacher_rb.sample(teacher_batch_size, seq_len=seq_len)
             student_data = rb.sample(student_batch_size, seq_len=seq_len)
+            # print("student: ", student_data["observations"].shape)
+            # print("teacher: ", teacher_data["observations"].shape)
             data = TensorDict({
                 "observations": torch.cat([student_data["observations"], teacher_data["observations"]], dim=0),
                 "critic_observations": torch.cat([student_data["critic_observations"], teacher_data["critic_observations"]], dim=0),
@@ -392,7 +394,7 @@ def main():
                 if args.use_next_vision_obs:
                     data["next"]["vision_observations"] = torch.cat([student_data["next"]["vision_observations"], teacher_data["next"]["vision_observations"]], dim=0)
         else:
-            batch_size = max(args.batch_size // (args.num_envs * seq_len), 1)
+            batch_size = args.batch_size
             data = rb.sample(max(1, batch_size), seq_len=seq_len)
         data["observations"] = normalize_obs(data["observations"].reshape(-1, n_obs)).reshape(-1, seq_len, n_obs)
         data["next"]["observations"] = normalize_obs(
@@ -447,7 +449,7 @@ def main():
                 device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
             ):
                 if args.use_vision:
-                    vision_latent = vision_nn(vision_obs.permute(0, 3, 1, 2))
+                    vision_latent = vision_nn(vision_obs.permute(0, 3, 1, 2) / args.normalize_vision_scalar)
                     vision_latent = vision_latent.unsqueeze(1)
                 else:
                     vision_latent = None
@@ -558,8 +560,11 @@ def main():
                     raise NotImplementedError
 
                 if args.use_vision:
-                    flat_next_vision_observations = next_vision_observations.view(-1, args.vision_input_width, args.vision_input_height, 1)
-                    next_vision_latent = vision_nn(flat_next_vision_observations.permute(0, 3, 1, 2)).reshape(-1, seq_len + args.memory_burnin, args.vision_latent_dim)
+                    with torch.no_grad():
+                        flat_next_vision_observations = next_vision_observations.view(-1, args.vision_input_width, args.vision_input_height, 1)
+                        next_vision_latent = vision_nn(
+                            flat_next_vision_observations.permute(0, 3, 1, 2) / args.normalize_vision_scalar
+                        ).reshape(-1, seq_len + args.memory_burnin, args.vision_latent_dim)
                 else:
                     next_vision_latent = None
 
@@ -682,9 +687,8 @@ def main():
                     vision_observations = data["vision_observations"]
                     flat_vision_observations = vision_observations.view(-1, args.vision_input_width, args.vision_input_height, 1)
                     vision_latent = vision_nn(
-                        flat_vision_observations.permute(0, 3, 1, 2),
+                        flat_vision_observations.permute(0, 3, 1, 2) / args.normalize_vision_scalar,
                         augment=args.use_vision_augmentation,
-
                     ).reshape(-1, seq_len + args.memory_burnin, args.vision_latent_dim)
                 else:
                     vision_latent = None
@@ -759,7 +763,7 @@ def main():
         compile_mode = args.compile_mode
         update_main = torch.compile(update_main, mode=compile_mode)
         update_pol = torch.compile(update_pol, mode=compile_mode)
-        # policy = torch.compile(policy, mode=None)
+        policy = torch.compile(policy, mode=None)
         normalize_obs = torch.compile(obs_normalizer.forward, mode=None)
         normalize_critic_obs = torch.compile(critic_obs_normalizer.forward, mode=None)
         if args.reward_normalization:
@@ -784,6 +788,7 @@ def main():
             critic_obs = torch.as_tensor(critic_obs, device=device, dtype=torch.float)
     else:
         obs = envs.reset()
+
     if args.checkpoint_path:
         # Load checkpoint if specified
         torch_checkpoint = torch.load(
@@ -797,6 +802,9 @@ def main():
         qnet.load_state_dict(torch_checkpoint["qnet_state_dict"])
         qnet_target.load_state_dict(torch_checkpoint["qnet_target_state_dict"])
         global_step = torch_checkpoint["global_step"]
+
+        if args.use_vision:
+            vision_nn.load_state_dict(torch_checkpoint["vision_model"])
     else:
         global_step = 0
 
@@ -819,9 +827,6 @@ def main():
     else:
         raise NotImplementedError
 
-    # dummy_in = torch.zeros((1, n_obs)).to(device)
-    # dummy_vision_in = torch.zeros((1, args.vision_latent_dim)).to(device)
-    # dummy_hidden_in = torch.zeros((1, 1, args.memory_hidden_dim)).to(device)
     while global_step < args.total_timesteps:
         mark_step()
         logs_dict = TensorDict()
@@ -837,11 +842,11 @@ def main():
         ):
             norm_obs = normalize_obs(obs)
             if args.use_vision:
-                explore_vision_latent = vision_nn(vision_obs.permute(0, 3, 1, 2))
+                explore_vision_latent = vision_nn(vision_obs.permute(0, 3, 1, 2) / args.normalize_vision_scalar)
             else:
                 explore_vision_latent = None
 
-            actions, explore_hidden_out = actor.explore(
+            actions, explore_hidden_out = policy(
                 obs=norm_obs,
                 hidden_in=explore_hidden_in,
                 vision_latent=explore_vision_latent,
@@ -934,9 +939,8 @@ def main():
                 soft_update(qnet, qnet_target, args.tau)
 
 
-            # if args.update_exploration_policy:
-            #     from_module(actor).data.to_module(actor_detach)
-            #     policy = actor_detach.explore
+            from_module(actor).data.to_module(actor_detach)
+            policy = actor_detach.explore
 
             if global_step % 100 == 0 and start_time is not None:
                 speed = (global_step - measure_burnin) / (time.time() - start_time)
@@ -959,15 +963,15 @@ def main():
                             logs[k] = v
 
 
-                    if args.eval_interval > 0 and global_step % args.eval_interval == 0:
-                        print(f"Evaluating at global step {global_step}")
-                        eval_avg_return, eval_avg_length = evaluate()
-                        if env_type in ["humanoid_bench", "isaaclab", "mtbench"]:
-                            # NOTE: Hacky way of evaluating performance, but just works
-                            obs = envs.reset()
-                        logs["Eval/eval_avg_return"] = eval_avg_return
-                        logs["Eval/eval_avg_length"] = eval_avg_length
-
+                    # if args.eval_interval > 0 and global_step % args.eval_interval == 0:
+                    #     print(f"Evaluating at global step {global_step}")
+                    #     eval_avg_return, eval_avg_length = evaluate()
+                    #     if env_type in ["humanoid_bench", "isaaclab", "mtbench"]:
+                    #         # NOTE: Hacky way of evaluating performance, but just works
+                    #         obs = envs.reset()
+                    #     logs["Eval/eval_avg_return"] = eval_avg_return
+                    #     logs["Eval/eval_avg_length"] = eval_avg_length
+                    #
                     if (
                         args.render_interval > 0
                         and global_step % args.render_interval == 0

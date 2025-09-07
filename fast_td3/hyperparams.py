@@ -153,6 +153,8 @@ class BaseArgs:
     """update rate for vision obs"""
     use_next_vision_obs: bool = True
     """if true, stores next vision obs, else use the current obs"""
+    normalize_vision_scalar: float = 1.0
+    """normalizes the image by this scalar"""
 
     seq_len: int = 50
     """sequence length for RNN"""
@@ -221,6 +223,7 @@ def get_args():
         "Isaac-Ant-v0": IsaacAntv0Args,
         "Unitree-Go2-Velocity": UnitreeGo2VelocityArgs,
         "Unitree-Go2-Parkour-Student": UnitreeGo2ParkourStudentArgs,
+        "Unitree-Go2-Parkour-Student-Play": UnitreeGo2ParkourStudentArgs,
         "Unitree-H1-Velocity": UnitreeH1VelocityArgs,
         # MTBench
         "MTBench-meta-world-v2-mt10": MetaWorldMT10Args,
@@ -631,6 +634,9 @@ class UnitreeGo2ParkourStudentArgs(IsaacLabArgs):
     reward_normalization: bool = True
     std_max: float = 0.1
     std_min: float = 0.1
+
+    learning_starts: int = 1000
+    normalize_vision_scalar: float = 10.0
 
 
 @dataclass
