@@ -742,12 +742,20 @@ def main():
                 actor.parameters(),
                 max_norm=args.max_grad_norm if args.max_grad_norm > 0 else float("inf"),
             )
+            if args.use_vision:
+                vision_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    vision_nn.parameters(),
+                    max_norm=args.max_grad_norm if args.max_grad_norm > 0 else float("inf"),
+                )
         else:
             actor_grad_norm = torch.tensor(0.0, device=device)
+            vision_grad_norm = torch.tensor(0.0, device=device)
         scaler.step(actor_optimizer)
         scaler.update()
         logs_dict["actor_grad_norm"] = actor_grad_norm.detach()
         logs_dict["actor_loss"] = actor_loss.detach()
+        if args.use_vision:
+            logs_dict["vision_grad_norm"] = vision_grad_norm.detach()
         return logs_dict
 
     @torch.no_grad()
@@ -962,6 +970,8 @@ def main():
                         for k, v in infos["isaaclab"]["log"].items():
                             logs[k] = v
 
+                    if args.use_vision:
+                            logs["Train/vision_grad_norm"] = logs_dict["vision_grad_norm"]
 
                     # if args.eval_interval > 0 and global_step % args.eval_interval == 0:
                     #     print(f"Evaluating at global step {global_step}")
