@@ -155,6 +155,12 @@ class BaseArgs:
     """if true, stores next vision obs, else use the current obs"""
     normalize_vision_scalar: float = 1.0
     """normalizes the image by this scalar"""
+    use_auxiliary_loss: bool = False
+    """if set, uses auxiliary loss for vision model"""
+    auxiliary_loss_weight: float = 0.1
+    """weight for auxiliary loss"""
+
+
 
     seq_len: int = 50
     """sequence length for RNN"""
@@ -170,6 +176,14 @@ class BaseArgs:
     """mini steps for critic"""
     num_mini_steps_actor: int = 1
     """mini steps for actor"""
+
+    # redq stuff
+    use_layer_norm: bool = False
+    """If set, uses layer norm in fasttd3 base architecture (not simba)"""
+    use_ensemble_critic: bool = False
+    """if set, uses ensemble critic"""
+    num_critics: int = 10
+    """number of critics to use for ensemble"""
 
 def get_args():
     """
@@ -636,7 +650,11 @@ class UnitreeGo2ParkourStudentArgs(IsaacLabArgs):
     std_min: float = 0.1
 
     learning_starts: int = 1000
-    normalize_vision_scalar: float = 10.0
+    normalize_vision_scalar: float = 1.0
+
+    use_layer_norm: bool = True
+    use_auxiliary_loss: bool = True
+    auxiliary_loss_weight: float = 0.01
 
 
 @dataclass

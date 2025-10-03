@@ -6,16 +6,17 @@ import matplotlib.pyplot as plt
 
 teacher_dict: TensorDict = TensorDict.load_memmap("../../stored_transitions/")
 
-vision_obs = teacher_dict["vision_observations"]
+vision_obs: torch.Tensor = teacher_dict["vision_observations"].clamp(0, 1)
 
 print("images:")
 print("\tmax: ", vision_obs.max())
 print("\tmin: ", vision_obs.min())
 print("\tmean: ", vision_obs.mean())
+print("\tstd: ", vision_obs.std())
 print("---")
 
 
-sd = torch.load("../../model-with-normalized-vision-and-new-activation.pt", map_location="cpu", weights_only=False)
+sd = torch.load("../../model-with-auxiliary-loss.pt", map_location="cpu", weights_only=False)
 cleaned_state_dict = {}
 bad_name = "_orig_mod."
 
@@ -27,13 +28,13 @@ for k, v in sd["vision_model"].items():
 vision_nn = DepthOnlyFCBackbone58x87(128)
 vision_nn.load_state_dict(cleaned_state_dict)
 
-print(vision_obs.shape)
 sample = vision_obs[:, 500:550].flatten(0, 1)
 latent = vision_nn(sample.permute(0, 3, 1, 2) / 10.0).detach().cpu().numpy()
 print("latent:")
 print("\tmax: ", latent.max())
 print("\tmin: ", latent.min())
 print("\tmean: ", latent.mean())
+print("\tstd: ", latent.std())
 print("---")
 
 pca = PCA(2)

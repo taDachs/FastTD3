@@ -82,12 +82,70 @@ class DepthOnlyFCBackbone58x87(nn.Module):
 
         return vision_latent
 
+class DepthOnlyFCDecoder(nn.Module):
+    def __init__(self, input_dim: int):
+        super().__init__()
+
+        # activation = nn.ELU()
+        activation = nn.Tanh()
+        self.image_decompression = nn.Sequential(
+                        # Inverse of the encoder's last linear layer
+            nn.Linear(input_dim, 128),
+            nn.LeakyReLU(),
+            nn.Linear(128, 1568),
+            nn.LeakyReLU(),
+            nn.Unflatten(1, (32, 7, 7)),
+
+            nn.ConvTranspose2d(32, 32, kernel_size=3),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(32, 32, kernel_size=2, stride=2, output_padding=1),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(32, 16, kernel_size=4),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(16, 16, kernel_size=2, stride=2),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(16, 1, kernel_size=5),
+            nn.Sigmoid()
+        )
+
+        self.output_activation = activation
+
+    def forward(self, x: torch.Tensor):
+        x = self.image_decompression(x)
+
+        return x
+
+
+class HeightMapHead(nn.Module):
+    def __init__(self, input_dim: int, output_size: tuple[int, int]):
+        super().__init__()
+
+        self.output_size = output_size
+
+        self.mlp = nn.Sequential(
+            nn.Linear(input_dim, 512), nn.ReLU(),
+            nn.Linear(512, output_size[0] * output_size[1])
+        )
+
+
+    def forward(self, x: torch.Tensor):
+        x = self.mlp(x)
+
+        x = x.reshape(-1, *self.output_size)
+
+        return x
+
 
 if __name__ == "__main__":
     bb = DepthOnlyFCBackbone58x87(128)
+    de = DepthOnlyFCDecoder(128)
 
     data = torch.zeros((16, 1, 48, 48))
 
-    out = bb(data, augment=True, hist=False)
+    out = bb(data)
+    reconst = de(out)
+
     print(data.shape)
     print(out.shape)
+
+    print(reconst.shape)

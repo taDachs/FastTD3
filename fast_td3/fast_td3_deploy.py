@@ -40,6 +40,7 @@ class Policy(nn.Module):
             hidden_dim=actor_hidden_dim,
             squash=args["squash"],
             noise_scheduling=args["noise_scheduling"],
+            use_layer_norm=args["use_layer_norm"],
         )
 
         if self.use_memory:
@@ -65,6 +66,7 @@ class Policy(nn.Module):
 
             actor_num_blocks = args["actor_num_blocks"]
             actor_kwargs.pop("init_scale")
+            actor_kwargs.pop("use_layer_norm")
             actor_kwargs.update(
                 {
                     "scaler_init": math.sqrt(2.0 / actor_hidden_dim),

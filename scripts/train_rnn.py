@@ -41,7 +41,7 @@ from fast_td3.fast_td3_utils import (
     mark_step,
 )
 from fast_td3.hyperparams import get_args, BaseArgs
-from fast_td3.vision_backbone import DepthOnlyFCBackbone58x87
+from fast_td3.vision_backbone import DepthOnlyFCBackbone58x87, HeightMapHead
 
 torch.set_float32_matmul_precision("high")
 
@@ -190,6 +190,7 @@ def main():
         "memory_hidden_dim": args.memory_hidden_dim,
         "use_vision_latent": args.use_vision,
         "vision_latent_dim": args.vision_latent_dim,
+        "use_layer_norm": args.use_layer_norm,
     }
     critic_kwargs = {
         "n_obs": n_critic_obs,
@@ -198,6 +199,7 @@ def main():
         "v_min": args.v_min,
         "v_max": args.v_max,
         "hidden_dim": args.critic_hidden_dim,
+        "use_layer_norm": args.use_layer_norm,
         "device": device,
     }
 
@@ -217,10 +219,14 @@ def main():
             actor_cls = MultiTaskActor
             critic_cls = MultiTaskCritic
         else:
-            from fast_td3.fast_td3 import RNNActor, Critic
+            from fast_td3.fast_td3 import RNNActor, Critic, EnsembleCritic
 
             actor_cls = RNNActor
-            critic_cls = Critic
+            if args.use_ensemble_critic:
+                critic_cls = EnsembleCritic
+                critic_kwargs["num_critics"] = args.num_critics
+            else:
+                critic_cls = Critic
 
         print("Using FastTD3")
     elif args.agent == "fasttd3_simbav2":
@@ -231,13 +237,18 @@ def main():
             actor_cls = MultiTaskActor
             critic_cls = MultiTaskCritic
         else:
-            from fast_td3.fast_td3_simbav2 import RNNActor, Critic
+            from fast_td3.fast_td3_simbav2 import RNNActor, Critic, EnsembleCritic
 
             actor_cls = RNNActor
-            critic_cls = Critic
+            if args.use_ensemble_critic:
+                critic_cls = EnsembleCritic
+                critic_kwargs["num_critics"] = args.num_critics
+            else:
+                critic_cls = Critic
 
         print("Using FastTD3 + SimbaV2")
         actor_kwargs.pop("init_scale")
+        actor_kwargs.pop("use_layer_norm")
         actor_kwargs.update(
             {
                 "scaler_init": math.sqrt(2.0 / args.actor_hidden_dim),
@@ -249,6 +260,7 @@ def main():
                 "num_blocks": args.actor_num_blocks,
             }
         )
+        critic_kwargs.pop("use_layer_norm")
         critic_kwargs.update(
             {
                 "scaler_init": math.sqrt(2.0 / args.critic_hidden_dim),
@@ -265,8 +277,12 @@ def main():
 
     actor = actor_cls(**actor_kwargs)
 
+    use_auxiliary_loss = args.use_vision and args.use_auxiliary_loss
     if args.use_vision:
         vision_nn = DepthOnlyFCBackbone58x87(args.vision_latent_dim).to(device)
+
+        if args.use_auxiliary_loss:
+            height_map_decoder = HeightMapHead(args.vision_latent_dim, (11, 17)).to(device)
 
     if env_type in ["mtbench"]:
         # Python 3.8 doesn't support 'from_module' in tensordict
@@ -603,49 +619,87 @@ def main():
                 discount = args.gamma ** effective_n_steps
                 flat_discount = discount.reshape(-1)
 
-                with torch.no_grad():
-                    next_state_actions = (actor(next_observations, hidden_in, next_vision_latent)[0] + clipped_noise).clamp(
-                        action_low, action_high
-                    )
+                if args.use_ensemble_critic:
+                    with torch.no_grad():
+                        next_state_actions = (actor(next_observations, hidden_in, next_vision_latent)[0] + clipped_noise).clamp(
+                            action_low, action_high
+                        )
 
-                    flat_next_state_actions = next_state_actions.reshape(-1, n_act)
+                        flat_next_state_actions = next_state_actions.reshape(-1, n_act)
 
-                    qf1_next_target_projected, qf2_next_target_projected = (
-                        qnet_target.projection(
+                        qf_next_target_projections = qnet_target.projection(
                             flat_next_critic_observations,
                             flat_next_state_actions,
                             flat_rewards,
                             flat_bootstrap,
                             flat_discount,
                         )
-                    )
-                    qf1_next_target_value = qnet_target.get_value(qf1_next_target_projected)
-                    qf2_next_target_value = qnet_target.get_value(qf2_next_target_projected)
-                    if args.use_cdq:
+                        qf_next_target_values = [qnet_target.get_value(z) for z in qf_next_target_projections]
+                        subset = random.sample(list(range(args.num_critics)), 2)
+                        qf1_next_target_value = qf_next_target_values[subset[0]]
+                        qf2_next_target_value = qf_next_target_values[subset[1]]
+                        qf1_next_target_projected = qf_next_target_projections[subset[0]]
+                        qf2_next_target_projected = qf_next_target_projections[subset[1]]
+
                         qf_next_target_dist = torch.where(
                             qf1_next_target_value.unsqueeze(1)
                             < qf2_next_target_value.unsqueeze(1),
                             qf1_next_target_projected,
                             qf2_next_target_projected,
                         )
-                        qf1_next_target_dist = qf2_next_target_dist = qf_next_target_dist
-                    else:
-                        qf1_next_target_dist, qf2_next_target_dist = (
-                            qf1_next_target_projected,
-                            qf2_next_target_projected,
+
+                    qfs = qnet(critic_observations.reshape(-1, n_critic_obs), actions.reshape(-1, n_act))
+                    flat_done_mask = done_mask.reshape(-1)
+                    num_valid = max(1, flat_done_mask.sum())
+
+                    for qf in qfs:
+                        qf_loss += -(torch.sum(
+                            qf_next_target_dist * F.log_softmax(qf, dim=1), dim=1
+                        ) * flat_done_mask).sum() / num_valid
+                else:
+                    with torch.no_grad():
+                        next_state_actions = (actor(next_observations, hidden_in, next_vision_latent)[0] + clipped_noise).clamp(
+                            action_low, action_high
                         )
 
-                qf1, qf2 = qnet(critic_observations.reshape(-1, n_critic_obs), actions.reshape(-1, n_act))
-                flat_done_mask = done_mask.reshape(-1)
-                # done_mask = torch.ones_like(done_mask, device=device)
-                num_valid = max(1, flat_done_mask.sum())
-                qf1_loss = -(torch.sum(
-                    qf1_next_target_dist * F.log_softmax(qf1, dim=1), dim=1
-                ) * flat_done_mask).sum() / num_valid
-                qf2_loss = -(torch.sum(
-                    qf2_next_target_dist * F.log_softmax(qf2, dim=1), dim=1
-                ) * flat_done_mask).sum() / num_valid
-                qf_loss += qf1_loss + qf2_loss
+                        flat_next_state_actions = next_state_actions.reshape(-1, n_act)
+
+                        qf1_next_target_projected, qf2_next_target_projected = (
+                            qnet_target.projection(
+                                flat_next_critic_observations,
+                                flat_next_state_actions,
+                                flat_rewards,
+                                flat_bootstrap,
+                                flat_discount,
+                            )
+                        )
+                        qf1_next_target_value = qnet_target.get_value(qf1_next_target_projected)
+                        qf2_next_target_value = qnet_target.get_value(qf2_next_target_projected)
+                        if args.use_cdq:
+                            qf_next_target_dist = torch.where(
+                                qf1_next_target_value.unsqueeze(1)
+                                < qf2_next_target_value.unsqueeze(1),
+                                qf1_next_target_projected,
+                                qf2_next_target_projected,
+                            )
+                            qf1_next_target_dist = qf2_next_target_dist = qf_next_target_dist
+                        else:
+                            qf1_next_target_dist, qf2_next_target_dist = (
+                                qf1_next_target_projected,
+                                qf2_next_target_projected,
+                            )
+
+                    qf1, qf2 = qnet(critic_observations.reshape(-1, n_critic_obs), actions.reshape(-1, n_act))
+                    flat_done_mask = done_mask.reshape(-1)
+                    # done_mask = torch.ones_like(done_mask, device=device)
+                    num_valid = max(1, flat_done_mask.sum())
+                    qf1_loss = -(torch.sum(
+                        qf1_next_target_dist * F.log_softmax(qf1, dim=1), dim=1
+                    ) * flat_done_mask).sum() / num_valid
+                    qf2_loss = -(torch.sum(
+                        qf2_next_target_dist * F.log_softmax(qf2, dim=1), dim=1
+                    ) * flat_done_mask).sum() / num_valid
+                    qf_loss += qf1_loss + qf2_loss
 
         qf_loss /= num_steps
 
@@ -671,6 +725,8 @@ def main():
 
     def update_pol(num_steps, seq_len, logs_dict):
         actor_loss = torch.zeros(1, device=device)
+        if use_auxiliary_loss:
+            auxiliary_loss = torch.zeros(1, device=device)
         for _ in range(num_steps):
             data, _ = sample_batch(seq_len + args.memory_burnin)
             with autocast(
@@ -716,26 +772,51 @@ def main():
                             vision_latent = vision_latent[:, args.memory_burnin:]
                         done_mask = done_mask[:, args.memory_burnin:]
 
-                qf1, qf2 = qnet(
-                    critic_observations.reshape(-1, n_critic_obs),
-                    actor(observations, hidden_in=hidden_in, vision_latent=vision_latent)[0].reshape(-1, n_act),
-                )
-                qf1_value = qnet.get_value(F.softmax(qf1, dim=1))
-                qf2_value = qnet.get_value(F.softmax(qf2, dim=1))
-                if args.use_cdq:
-                    qf_value = torch.minimum(qf1_value, qf2_value)
+                if args.use_ensemble_critic:
+                    qfs = qnet(
+                        critic_observations.reshape(-1, n_critic_obs),
+                        actor(observations, hidden_in=hidden_in, vision_latent=vision_latent)[0].reshape(-1, n_act),
+                    )
+                    qf_values = [qnet.get_value(F.softmax(qf, dim=1)) for qf in qfs]
+                    qf_value = sum(qf_values) / args.num_critics
                 else:
-                    qf_value = (qf1_value + qf2_value) / 2.0
+                    qf1, qf2 = qnet(
+                        critic_observations.reshape(-1, n_critic_obs),
+                        actor(observations, hidden_in=hidden_in, vision_latent=vision_latent)[0].reshape(-1, n_act),
+                    )
+                    qf1_value = qnet.get_value(F.softmax(qf1, dim=1))
+                    qf2_value = qnet.get_value(F.softmax(qf2, dim=1))
+                    if args.use_cdq:
+                        qf_value = torch.minimum(qf1_value, qf2_value)
+                    else:
+                        qf_value = (qf1_value + qf2_value) / 2.0
                 flat_done_mask = done_mask.reshape(-1)
                 # flat_done_mask = torch.ones_like(flat_done_mask, device=device)
                 num_valid = max(1, flat_done_mask.sum())
                 actor_loss += -(qf_value * flat_done_mask).sum() / num_valid
 
+                if use_auxiliary_loss and args.use_vision:
+                    reconst_height_map = height_map_decoder(vision_latent.reshape(-1, args.vision_latent_dim))
+                    grid_size = (11, 17)
+                    height_map = critic_observations.reshape(-1, n_critic_obs)[..., -2 * 187:-187].reshape(-1, *grid_size)
+
+                    reconst_loss = (reconst_height_map - height_map) ** 2
+                    reconst_loss = reconst_loss.sum(dim=(1, 2)).mean()
+
+                    auxiliary_loss += reconst_loss
+
         actor_loss /= num_steps
+
+        if use_auxiliary_loss:
+            auxiliary_loss /= num_steps
+            auxiliary_loss *= args.auxiliary_loss_weight
 
         actor_optimizer.zero_grad(set_to_none=True)
 
-        scaler.scale(actor_loss).backward()
+        if use_auxiliary_loss:
+            scaler.scale(actor_loss + auxiliary_loss).backward()
+        else:
+            scaler.scale(actor_loss).backward()
         scaler.unscale_(actor_optimizer)
         if args.use_grad_norm_clipping:
             actor_grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -754,6 +835,8 @@ def main():
         scaler.update()
         logs_dict["actor_grad_norm"] = actor_grad_norm.detach()
         logs_dict["actor_loss"] = actor_loss.detach()
+        if use_auxiliary_loss:
+            logs_dict["auxiliary_loss"] = auxiliary_loss.detach()
         if args.use_vision:
             logs_dict["vision_grad_norm"] = vision_grad_norm.detach()
         return logs_dict
@@ -779,6 +862,9 @@ def main():
         normalize_reward = torch.compile(reward_normalizer.forward, mode=None)
         if args.use_vision:
             vision_nn = torch.compile(vision_nn, mode=None)
+
+            if use_auxiliary_loss:
+                height_map_decoder = torch.compile(height_map_decoder, mode=None)
     else:
         normalize_obs = obs_normalizer.forward
         normalize_critic_obs = critic_obs_normalizer.forward
@@ -971,7 +1057,37 @@ def main():
                             logs[k] = v
 
                     if args.use_vision:
-                            logs["Train/vision_grad_norm"] = logs_dict["vision_grad_norm"]
+                        logs["Train/vision_grad_norm"] = logs_dict["vision_grad_norm"]
+
+                        if use_auxiliary_loss:
+                            logs["Train/auxiliary_loss"] = logs_dict["auxiliary_loss"]
+
+                    if args.use_vision:
+                        with torch.no_grad(), autocast(
+                            device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
+                        ):
+                            blind_vision_latent = torch.zeros_like(explore_vision_latent,
+                                                                   device=device)
+
+                            vision_actions, _ = policy(
+                                obs=norm_obs,
+                                hidden_in=explore_hidden_in,
+                                vision_latent=explore_vision_latent,
+                                dones=None,
+                                deterministic=True,
+                            )
+
+                            blind_actions, _ = policy(
+                                obs=norm_obs,
+                                hidden_in=explore_hidden_in,
+                                vision_latent=blind_vision_latent,
+                                dones=None,
+                                deterministic=True,
+                            )
+
+                            vision_divergence = ((vision_actions - blind_actions) ** 2).sum(dim=-1).mean()
+                            logs["Train/vision_divergence"] = vision_divergence.detach()
+
 
                     # if args.eval_interval > 0 and global_step % args.eval_interval == 0:
                     #     print(f"Evaluating at global step {global_step}")
@@ -1023,6 +1139,7 @@ def main():
                     args,
                     f"models/{run_name}_{global_step}.pt",
                     vision_model=vision_nn if args.use_vision else None,
+                    height_map_head=height_map_decoder if use_auxiliary_loss else None,
                 )
 
         global_step += 1
@@ -1049,6 +1166,7 @@ def main():
         args,
         f"models/{run_name}_final.pt",
         vision_model=vision_nn if args.use_vision else None,
+        height_map_head=height_map_decoder if use_auxiliary_loss else None,
     )
 
 

@@ -12,19 +12,34 @@ class DistributionalQNetwork(nn.Module):
         v_min: float,
         v_max: float,
         hidden_dim: int,
+        use_layer_norm: bool = False,
         device: torch.device | None = None,
     ):
         super().__init__()
 
-        self.net = nn.Sequential(
-            nn.Linear(n_obs + n_act, hidden_dim, device=device),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim // 2, device=device),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, hidden_dim // 4, device=device),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 4, num_atoms, device=device),
-        )
+        if use_layer_norm:
+            self.net = nn.Sequential(
+                nn.Linear(n_obs + n_act, hidden_dim, device=device),
+                nn.LayerNorm(hidden_dim, device=device),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim // 2, device=device),
+                nn.LayerNorm(hidden_dim // 2, device=device),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, hidden_dim // 4, device=device),
+                nn.LayerNorm(hidden_dim // 4, device=device),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 4, num_atoms, device=device),
+            )
+        else:
+            self.net = nn.Sequential(
+                nn.Linear(n_obs + n_act, hidden_dim, device=device),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim // 2, device=device),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, hidden_dim // 4, device=device),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 4, num_atoms, device=device),
+            )
         self.v_min = v_min
         self.v_max = v_max
         self.num_atoms = num_atoms
@@ -90,6 +105,7 @@ class Critic(nn.Module):
         v_min: float,
         v_max: float,
         hidden_dim: int,
+        use_layer_norm: bool = False,
         device: torch.device = None,
     ):
         super().__init__()
@@ -100,6 +116,7 @@ class Critic(nn.Module):
             v_min=v_min,
             v_max=v_max,
             hidden_dim=hidden_dim,
+            use_layer_norm=use_layer_norm,
             device=device,
         )
         self.qnet2 = DistributionalQNetwork(
@@ -109,6 +126,7 @@ class Critic(nn.Module):
             v_min=v_min,
             v_max=v_max,
             hidden_dim=hidden_dim,
+            use_layer_norm=use_layer_norm,
             device=device,
         )
 
@@ -154,6 +172,68 @@ class Critic(nn.Module):
         return torch.sum(probs * self.q_support, dim=1)
 
 
+class EnsembleCritic(nn.Module):
+    def __init__(
+        self,
+        n_obs: int,
+        n_act: int,
+        num_atoms: int,
+        v_min: float,
+        v_max: float,
+        hidden_dim: int,
+        use_layer_norm: bool = False,
+        num_critics: int = 10,
+        device: torch.device = None,
+    ):
+        super().__init__()
+        self.qnets = nn.ModuleList()
+        for _ in range(num_critics):
+            self.qnets.append(DistributionalQNetwork(
+                n_obs=n_obs,
+                n_act=n_act,
+                num_atoms=num_atoms,
+                v_min=v_min,
+                v_max=v_max,
+                hidden_dim=hidden_dim,
+                use_layer_norm=use_layer_norm,
+                device=device,
+            ))
+
+        self.register_buffer(
+            "q_support", torch.linspace(v_min, v_max, num_atoms, device=device)
+        )
+        self.device = device
+
+    def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> list[torch.Tensor]:
+        return [qnet(obs, actions) for qnet in self.qnets]
+
+    def projection(
+        self,
+        obs: torch.Tensor,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        bootstrap: torch.Tensor,
+        discount: float,
+    ) -> list[torch.Tensor]:
+        """Projection operation that includes q_support directly"""
+
+        return [
+            qnet.projection(
+                obs,
+                actions,
+                rewards,
+                bootstrap,
+                discount,
+                self.q_support,
+                self.q_support.device,
+            ) for qnet in self.qnets
+        ]
+
+    def get_value(self, probs: torch.Tensor) -> torch.Tensor:
+        """Calculate value from logits using support"""
+        return torch.sum(probs * self.q_support, dim=1)
+
+
 class RNNActor(nn.Module):
     def __init__(
         self,
@@ -170,6 +250,7 @@ class RNNActor(nn.Module):
         memory_hidden_dim: int | None = None,
         use_vision_latent: bool = False,
         vision_latent_dim: bool = False,
+        use_layer_norm: bool = False,
         device: torch.device | None = None,
     ):
         super().__init__()
@@ -193,14 +274,27 @@ class RNNActor(nn.Module):
         else:
             raise NotImplementedError
 
-        self.net = nn.Sequential(
-            nn.Linear(memory_hidden_dim, hidden_dim, device=device),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim // 2, device=device),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, hidden_dim // 4, device=device),
-            nn.ReLU(),
-        )
+        if use_layer_norm:
+            self.net = nn.Sequential(
+                nn.Linear(memory_hidden_dim, hidden_dim, device=device),
+                nn.LayerNorm(hidden_dim, device=device),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim // 2, device=device),
+                nn.LayerNorm(hidden_dim // 2, device=device),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, hidden_dim // 4, device=device),
+                nn.LayerNorm(hidden_dim // 4, device=device),
+                nn.ReLU(),
+            )
+        else:
+            self.net = nn.Sequential(
+                nn.Linear(memory_hidden_dim, hidden_dim, device=device),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim // 2, device=device),
+                nn.ReLU(),
+                nn.Linear(hidden_dim // 2, hidden_dim // 4, device=device),
+                nn.ReLU(),
+            )
         if squash:
             self.fc_mu = nn.Sequential(
                 nn.Linear(hidden_dim // 4, n_act, device=device),

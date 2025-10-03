@@ -1162,6 +1162,7 @@ def save_params(
     args,
     save_path,
     vision_model=None,
+    height_map_head=None,
 ):
     """Save model parameters and training configuration to disk."""
 
@@ -1191,6 +1192,8 @@ def save_params(
     }
     if vision_model is not None:
         save_dict["vision_model"] = cpu_state(get_ddp_state_dict(vision_model))
+    if height_map_head is not None:
+        save_dict["height_map_head"] = cpu_state(get_ddp_state_dict(height_map_head))
     torch.save(save_dict, save_path, _use_new_zipfile_serialization=True)
     print(f"Saved parameters and configuration to {save_path}")
 

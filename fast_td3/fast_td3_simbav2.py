@@ -409,6 +409,79 @@ class Critic(nn.Module):
         return torch.sum(probs * self.q_support, dim=1)
 
 
+class EnsembleCritic(nn.Module):
+    def __init__(
+        self,
+        n_obs: int,
+        n_act: int,
+        num_atoms: int,
+        v_min: float,
+        v_max: float,
+        hidden_dim: int,
+        scaler_init: float,
+        scaler_scale: float,
+        alpha_init: float,
+        alpha_scale: float,
+        num_blocks: int,
+        c_shift: float,
+        expansion: int,
+        num_critics: int = 10,
+        device: torch.device = None,
+    ):
+        super().__init__()
+        self.qnets = nn.ModuleList()
+        for _ in range(num_critics):
+            self.qnets.append(DistributionalQNetwork(
+                    n_obs=n_obs,
+                    n_act=n_act,
+                    num_atoms=num_atoms,
+                    v_min=v_min,
+                    v_max=v_max,
+                    scaler_init=scaler_init,
+                    scaler_scale=scaler_scale,
+                    alpha_init=alpha_init,
+                    alpha_scale=alpha_scale,
+                    num_blocks=num_blocks,
+                    c_shift=c_shift,
+                    expansion=expansion,
+                    hidden_dim=hidden_dim,
+                    device=device,
+            ))
+
+        self.register_buffer(
+            "q_support", torch.linspace(v_min, v_max, num_atoms, device=device)
+        )
+        self.device = device
+
+    def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> list[torch.Tensor]:
+        return [qnet(obs, actions) for qnet in self.qnets]
+
+    def projection(
+        self,
+        obs: torch.Tensor,
+        actions: torch.Tensor,
+        rewards: torch.Tensor,
+        bootstrap: torch.Tensor,
+        discount: float,
+    ) -> list[torch.Tensor]:
+        """Projection operation that includes q_support directly"""
+
+        return [
+            qnet.projection(
+                obs,
+                actions,
+                rewards,
+                bootstrap,
+                discount,
+                self.q_support,
+                self.q_support.device,
+            ) for qnet in self.qnets
+        ]
+
+    def get_value(self, probs: torch.Tensor) -> torch.Tensor:
+        """Calculate value from logits using support"""
+        return torch.sum(probs * self.q_support, dim=1)
+
 class RNNActor(nn.Module):
     def __init__(
         self,
