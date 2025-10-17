@@ -518,9 +518,9 @@ class RNNActor(nn.Module):
 
         if self.use_vision_latent:
             if self.cat_proprio:
-                memory_in_dim = n_obs
                 embedder_in_dim = memory_hidden_dim
                 n_obs += vision_latent_dim
+                memory_in_dim = n_obs
             else:
                 memory_in_dim = vision_latent_dim
                 embedder_in_dim = memory_hidden_dim + n_obs
