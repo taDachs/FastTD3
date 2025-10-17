@@ -1175,8 +1175,6 @@ def save_params(
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     save_dict = {
         "actor_state_dict": cpu_state(get_ddp_state_dict(actor)),
-        "qnet_state_dict": cpu_state(get_ddp_state_dict(qnet)),
-        "qnet_target_state_dict": cpu_state(get_ddp_state_dict(qnet_target)),
         "obs_normalizer_state": (
             cpu_state(obs_normalizer.state_dict())
             if hasattr(obs_normalizer, "state_dict")
@@ -1190,6 +1188,10 @@ def save_params(
         "args": vars(args),  # Save all arguments
         "global_step": global_step,
     }
+    if qnet is not None:
+        save_dict["qnet_state_dict"] = cpu_state(get_ddp_state_dict(qnet))
+    if qnet_target is not None:
+        save_dict["qnet_target_state_dict"] = cpu_state(get_ddp_state_dict(qnet_target))
     if vision_model is not None:
         save_dict["vision_model"] = cpu_state(get_ddp_state_dict(vision_model))
     if height_map_head is not None:

@@ -42,6 +42,9 @@ from fast_td3.fast_td3_utils import (
 )
 from fast_td3.hyperparams import get_args, BaseArgs
 from fast_td3.vision_backbone import DepthOnlyFCBackbone58x87, HeightMapHead
+from fast_td3.environments.isaaclab_env import IsaacLabEnv
+
+from rsl_rl.runners import OnPolicyRunner
 
 torch.set_float32_matmul_precision("high")
 
@@ -100,8 +103,6 @@ def main():
             args.env_name, 1, render_mode="rgb_array", device=device
         )
     elif args.env_name.startswith("Isaac-") or args.env_name.startswith("Unitree-"):
-        from fast_td3.environments.isaaclab_env import IsaacLabEnv
-
         env_type = "isaaclab"
         envs = IsaacLabEnv(
             args.env_name,
@@ -109,7 +110,7 @@ def main():
             args.num_envs,
             args.seed,
             action_bounds=args.action_bounds if args.squash else None,
-            headless=True,
+            headless=args.headless,
         )
         eval_envs = envs
         render_env = envs
@@ -296,15 +297,6 @@ def main():
         from_module(actor).data.to_module(actor_detach)
         policy = actor_detach.explore
 
-    qnet = critic_cls(**critic_kwargs)
-    qnet_target = critic_cls(**critic_kwargs)
-    qnet_target.load_state_dict(qnet.state_dict())
-
-    q_optimizer = optim.AdamW(
-        list(qnet.parameters()),
-        lr=torch.tensor(args.critic_learning_rate, device=device),
-        weight_decay=args.weight_decay,
-    )
     if args.use_vision:
         actor_optimizer = optim.AdamW(
             list(actor.parameters()) + list(vision_nn.parameters()),
@@ -319,11 +311,6 @@ def main():
         )
 
     # Add learning rate schedulers
-    q_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        q_optimizer,
-        T_max=args.total_timesteps,
-        eta_min=torch.tensor(args.critic_learning_rate_end, device=device),
-    )
     actor_scheduler = optim.lr_scheduler.CosineAnnealingLR(
         actor_optimizer,
         T_max=args.total_timesteps,
@@ -379,9 +366,8 @@ def main():
             slice = teacher_dict.apply(get_slice)
             teacher_rb.extend(slice)
 
-
-    policy_noise = args.policy_noise
-    noise_clip = args.noise_clip
+    from fast_td3.rsl_rl_runner import load_teacher_policy
+    teacher_policy = load_teacher_policy(envs.envs, "../../ppo-new-reward-test.pt")
 
     @torch.compiler.disable
     def sample_batch(seq_len: int):
@@ -441,295 +427,8 @@ def main():
 
         return data, raw_rewards
 
-    def evaluate():
-        num_eval_envs = eval_envs.num_envs
-        episode_returns = torch.zeros(num_eval_envs, device=device)
-        episode_lengths = torch.zeros(num_eval_envs, device=device)
-        done_masks = torch.zeros(num_eval_envs, dtype=torch.bool, device=device)
-
-        if env_type == "isaaclab":
-            if args.use_vision:
-                obs, vision_obs = eval_envs.reset(random_start_init=False, vision=True)
-            else:
-                obs = eval_envs.reset(random_start_init=False)
-        else:
-            obs = eval_envs.reset()
-
-        # Run for a fixed number of steps
-        if args.memory_type == "gru":
-            hidden_in = torch.zeros(1, args.num_envs, actor.memory_hidden_dim, device=device)
-        elif args.memory_type == "lstm":
-            hidden_in = (
-                    torch.zeros(1, args.num_envs, actor.memory_hidden_dim, device=device),
-                    torch.zeros(1, args.num_envs, actor.memory_hidden_dim, device=device)
-            )
-        else:
-            raise NotImplementedError
-        for i in range(eval_envs.max_episode_steps):
-            with torch.no_grad(), autocast(
-                device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
-            ):
-                if args.use_vision:
-                    vision_latent = vision_nn(vision_obs.permute(0, 3, 1, 2) / args.normalize_vision_scalar)
-                    vision_latent = vision_latent.unsqueeze(1)
-                else:
-                    vision_latent = None
-                obs = normalize_obs(obs, update=False)
-                obs = obs.unsqueeze(1)
-                actions, hidden_in = actor(obs, hidden_in=hidden_in, vision_latent=vision_latent)
-                actions = actions.squeeze(1)
-
-            next_obs, rewards, dones, infos = eval_envs.step(actions.float())
-
-            if env_type == "mtbench":
-                # We only report success rate in MTBench evaluation
-                rewards = (
-                    infos["episode"]["success"].float() if "episode" in infos else 0.0
-                )
-            episode_returns = torch.where(
-                ~done_masks, episode_returns + rewards, episode_returns
-            )
-            episode_lengths = torch.where(
-                ~done_masks, episode_lengths + 1, episode_lengths
-            )
-            if env_type == "mtbench" and "episode" in infos:
-                dones = dones | infos["episode"]["success"]
-            done_masks = torch.logical_or(done_masks, dones)
-            if done_masks.all():
-                break
-            obs = next_obs
-            if args.use_vision:
-                vision_obs = infos["observations"]["vision"]
-
-        return episode_returns.mean().item(), episode_lengths.mean().item()
-
-    def render_with_rollout():
-        # Quick rollout for rendering
-        if env_type == "humanoid_bench":
-            obs = render_env.reset()
-            renders = [render_env.render()]
-        elif env_type in ["isaaclab", "mtbench"]:
-            raise NotImplementedError(
-                "We don't support rendering for IsaacLab and MTBench environments"
-            )
-        else:
-            obs = render_env.reset()
-            render_env.state.info["command"] = jnp.array([[1.0, 0.0, 0.0]])
-            renders = [render_env.state]
-        for i in range(render_env.max_episode_steps):
-            with torch.no_grad(), autocast(
-                device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
-            ):
-                obs = normalize_obs(obs, update=False)
-                actions = actor(obs)
-            next_obs, _, done, _ = render_env.step(actions.float())
-            if env_type == "mujoco_playground":
-                render_env.state.info["command"] = jnp.array([[1.0, 0.0, 0.0]])
-            if i % 2 == 0:
-                if env_type == "humanoid_bench":
-                    renders.append(render_env.render())
-                else:
-                    renders.append(render_env.state)
-            if done.any():
-                break
-            obs = next_obs
-
-        if env_type == "mujoco_playground":
-            renders = render_env.render_trajectory(renders)
-        return renders
-
-    def update_main(num_steps: int, seq_len: int, logs_dict):
-        qf_loss = torch.zeros(1, device=device)
-        for i in range(num_steps):
-            data, raw_rewards = sample_batch(seq_len + args.memory_burnin)
-            with autocast(
-                device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled
-            ):
-                observations = data["observations"]
-                next_observations = data["next"]["observations"]
-                if envs.asymmetric_obs:
-                    critic_observations = data["critic_observations"]
-                    next_critic_observations = data["next"]["critic_observations"]
-                else:
-                    critic_observations = observations
-                    next_critic_observations = next_observations
-                actions = data["actions"]
-                rewards = data["next"]["rewards"]
-                dones = data["next"]["dones"].bool()
-                truncations = data["next"]["truncations"].bool()
-                effective_n_steps = data["next"]["effective_n_steps"]
-                done_mask = data["mask"]
-                if args.use_vision:
-                    if args.use_next_vision_obs:
-                        next_vision_observations = data["next"]["vision_observations"]
-                    else:
-                        next_vision_observations = data["vision_observations"]
-
-                if args.disable_bootstrap:
-                    bootstrap = (~dones).float()
-                else:
-                    bootstrap = (truncations | ~dones).float()
-
-                if args.memory_type == "gru":
-                    hidden_in = torch.zeros(1, actions.shape[0], actor.memory_hidden_dim, device=device)
-                elif args.memory_type == "lstm":
-                    hidden_in = (
-                            torch.zeros(1, actions.shape[0], actor.memory_hidden_dim, device=device),
-                            torch.zeros(1, actions.shape[0], actor.memory_hidden_dim, device=device)
-                    )
-                else:
-                    raise NotImplementedError
-
-                if args.use_vision:
-                    with torch.no_grad():
-                        flat_next_vision_observations = next_vision_observations.view(-1, args.vision_input_width, args.vision_input_height, 1)
-                        next_vision_latent = vision_nn(
-                            flat_next_vision_observations.permute(0, 3, 1, 2) / args.normalize_vision_scalar
-                        ).reshape(-1, seq_len + args.memory_burnin, args.vision_latent_dim)
-                else:
-                    next_vision_latent = None
-
-                if args.memory_burnin > 0:
-                    with torch.no_grad():
-                        _, hidden_in = actor(
-                            next_observations[:, :args.memory_burnin],
-                            hidden_in,
-                            next_vision_latent[:, :args.memory_burnin] if args.use_vision else None,
-                        )
-
-                    observations = observations[:, args.memory_burnin:]
-                    critic_observations = critic_observations[:, args.memory_burnin:]
-
-                    next_critic_observations = next_critic_observations[:, args.memory_burnin:]
-                    next_observations = next_observations[:, args.memory_burnin:]
-
-                    actions = actions[:, args.memory_burnin:]
-                    rewards = rewards[:, args.memory_burnin:]
-                    dones = dones[:, args.memory_burnin:]
-                    truncations = truncations[:, args.memory_burnin:]
-                    effective_n_steps = effective_n_steps[:, args.memory_burnin:]
-                    bootstrap = bootstrap[:, args.memory_burnin:]
-                    done_mask = done_mask[:, args.memory_burnin:]
-                    if args.use_vision:
-                        next_vision_latent = next_vision_latent[:, args.memory_burnin:]
-
-                clipped_noise = torch.randn_like(actions)
-                clipped_noise = clipped_noise.mul(policy_noise).clamp(
-                    -noise_clip, noise_clip
-                )
-
-                flat_next_critic_observations = next_critic_observations.reshape(-1, n_critic_obs)
-                flat_rewards = rewards.reshape(-1)
-                flat_bootstrap = bootstrap.reshape(-1)
-                discount = args.gamma ** effective_n_steps
-                flat_discount = discount.reshape(-1)
-
-                if args.use_ensemble_critic:
-                    with torch.no_grad():
-                        next_state_actions = (actor(next_observations, hidden_in, next_vision_latent)[0] + clipped_noise).clamp(
-                            action_low, action_high
-                        )
-
-                        flat_next_state_actions = next_state_actions.reshape(-1, n_act)
-
-                        qf_next_target_projections = qnet_target.projection(
-                            flat_next_critic_observations,
-                            flat_next_state_actions,
-                            flat_rewards,
-                            flat_bootstrap,
-                            flat_discount,
-                        )
-                        qf_next_target_values = [qnet_target.get_value(z) for z in qf_next_target_projections]
-                        subset = random.sample(list(range(args.num_critics)), 2)
-                        qf1_next_target_value = qf_next_target_values[subset[0]]
-                        qf2_next_target_value = qf_next_target_values[subset[1]]
-                        qf1_next_target_projected = qf_next_target_projections[subset[0]]
-                        qf2_next_target_projected = qf_next_target_projections[subset[1]]
-
-                        qf_next_target_dist = torch.where(
-                            qf1_next_target_value.unsqueeze(1)
-                            < qf2_next_target_value.unsqueeze(1),
-                            qf1_next_target_projected,
-                            qf2_next_target_projected,
-                        )
-
-                    qfs = qnet(critic_observations.reshape(-1, n_critic_obs), actions.reshape(-1, n_act))
-                    flat_done_mask = done_mask.reshape(-1)
-                    num_valid = max(1, flat_done_mask.sum())
-
-                    for qf in qfs:
-                        qf_loss += -(torch.sum(
-                            qf_next_target_dist * F.log_softmax(qf, dim=1), dim=1
-                        ) * flat_done_mask).sum() / num_valid
-                else:
-                    with torch.no_grad():
-                        next_state_actions = (actor(next_observations, hidden_in, next_vision_latent)[0] + clipped_noise).clamp(
-                            action_low, action_high
-                        )
-
-                        flat_next_state_actions = next_state_actions.reshape(-1, n_act)
-
-                        qf1_next_target_projected, qf2_next_target_projected = (
-                            qnet_target.projection(
-                                flat_next_critic_observations,
-                                flat_next_state_actions,
-                                flat_rewards,
-                                flat_bootstrap,
-                                flat_discount,
-                            )
-                        )
-                        qf1_next_target_value = qnet_target.get_value(qf1_next_target_projected)
-                        qf2_next_target_value = qnet_target.get_value(qf2_next_target_projected)
-                        if args.use_cdq:
-                            qf_next_target_dist = torch.where(
-                                qf1_next_target_value.unsqueeze(1)
-                                < qf2_next_target_value.unsqueeze(1),
-                                qf1_next_target_projected,
-                                qf2_next_target_projected,
-                            )
-                            qf1_next_target_dist = qf2_next_target_dist = qf_next_target_dist
-                        else:
-                            qf1_next_target_dist, qf2_next_target_dist = (
-                                qf1_next_target_projected,
-                                qf2_next_target_projected,
-                            )
-
-                    qf1, qf2 = qnet(critic_observations.reshape(-1, n_critic_obs), actions.reshape(-1, n_act))
-                    flat_done_mask = done_mask.reshape(-1)
-                    # done_mask = torch.ones_like(done_mask, device=device)
-                    num_valid = max(1, flat_done_mask.sum())
-                    qf1_loss = -(torch.sum(
-                        qf1_next_target_dist * F.log_softmax(qf1, dim=1), dim=1
-                    ) * flat_done_mask).sum() / num_valid
-                    qf2_loss = -(torch.sum(
-                        qf2_next_target_dist * F.log_softmax(qf2, dim=1), dim=1
-                    ) * flat_done_mask).sum() / num_valid
-                    qf_loss += qf1_loss + qf2_loss
-
-        qf_loss /= num_steps
-
-        q_optimizer.zero_grad(set_to_none=True)
-        scaler.scale(qf_loss).backward()
-        scaler.unscale_(q_optimizer)
-
-        if args.use_grad_norm_clipping:
-            critic_grad_norm = torch.nn.utils.clip_grad_norm_(
-                qnet.parameters(),
-                max_norm=args.max_grad_norm if args.max_grad_norm > 0 else float("inf"),
-            )
-        else:
-            critic_grad_norm = torch.tensor(0.0, device=device)
-        scaler.step(q_optimizer)
-        scaler.update()
-
-        logs_dict["critic_grad_norm"] = critic_grad_norm.detach()
-        logs_dict["qf_loss"] = qf_loss.detach()
-        logs_dict["qf_max"] = qf1_next_target_value.max().detach()
-        logs_dict["qf_min"] = qf1_next_target_value.min().detach()
-        return logs_dict
-
     def update_pol(num_steps, seq_len, logs_dict):
-        actor_loss = torch.zeros(1, device=device)
+        actor_bc_loss = torch.zeros(1, device=device)
         if use_auxiliary_loss:
             auxiliary_loss = torch.zeros(1, device=device)
         for _ in range(num_steps):
@@ -778,35 +477,11 @@ def main():
                         done_mask = done_mask[:, args.memory_burnin:]
 
                 actions = actor(observations, hidden_in=hidden_in, vision_latent=vision_latent)[0].reshape(-1, n_act)
-                if args.use_ensemble_critic:
-                    qfs = qnet(
-                        critic_observations.reshape(-1, n_critic_obs),
-                        actions,
-                    )
-                    qf_values = [qnet.get_value(F.softmax(qf, dim=1)) for qf in qfs]
-                    qf_value = sum(qf_values) / args.num_critics
-                else:
-                    qf1, qf2 = qnet(
-                        critic_observations.reshape(-1, n_critic_obs),
-                        actions,
-                    )
-                    qf1_value = qnet.get_value(F.softmax(qf1, dim=1))
-                    qf2_value = qnet.get_value(F.softmax(qf2, dim=1))
-                    if args.use_cdq:
-                        qf_value = torch.minimum(qf1_value, qf2_value)
-                    else:
-                        qf_value = (qf1_value + qf2_value) / 2.0
+                teacher_actions = data["actions"].reshape(-1, n_act)
                 flat_done_mask = done_mask.reshape(-1)
                 # flat_done_mask = torch.ones_like(flat_done_mask, device=device)
                 num_valid = max(1, flat_done_mask.sum())
-                actor_loss += -(qf_value * flat_done_mask).sum() / num_valid
-
-
-                if args.offline_mode:
-                    # https://arxiv.org/abs/2306.02451
-                    q_abs = qf_value.detach().abs().mean()
-                    bc_loss = ((actions - data["actions"].reshape(-1, n_act)) ** 2).mean()
-                    actor_loss += actor_loss + args.bc_alpha * q_abs * bc_loss
+                actor_bc_loss += ((((actions - teacher_actions) ** 2).sum(-1)) * flat_done_mask).sum() / num_valid
 
                 if use_auxiliary_loss and args.use_vision:
                     reconst_height_map = height_map_decoder(vision_latent.reshape(-1, args.vision_latent_dim))
@@ -818,7 +493,7 @@ def main():
 
                     auxiliary_loss += reconst_loss
 
-        actor_loss /= num_steps
+        actor_bc_loss /= num_steps
 
         if use_auxiliary_loss:
             auxiliary_loss /= num_steps
@@ -827,9 +502,9 @@ def main():
         actor_optimizer.zero_grad(set_to_none=True)
 
         if use_auxiliary_loss:
-            scaler.scale(actor_loss + auxiliary_loss).backward()
+            scaler.scale(actor_bc_loss + auxiliary_loss).backward()
         else:
-            scaler.scale(actor_loss).backward()
+            scaler.scale(actor_bc_loss).backward()
         scaler.unscale_(actor_optimizer)
         if args.use_grad_norm_clipping:
             actor_grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -847,7 +522,7 @@ def main():
         scaler.step(actor_optimizer)
         scaler.update()
         logs_dict["actor_grad_norm"] = actor_grad_norm.detach()
-        logs_dict["actor_loss"] = actor_loss.detach()
+        logs_dict["actor_bc_loss"] = actor_bc_loss.detach()
         if use_auxiliary_loss:
             logs_dict["auxiliary_loss"] = auxiliary_loss.detach()
         if args.use_vision:
@@ -862,10 +537,8 @@ def main():
         torch._foreach_mul_(tgt_ps, 1.0 - tau)
         torch._foreach_add_(tgt_ps, src_ps, alpha=tau)
 
-
     if args.compile:
         compile_mode = args.compile_mode
-        update_main = torch.compile(update_main, mode=compile_mode)
         update_pol = torch.compile(update_pol, mode=compile_mode)
         policy = torch.compile(policy, mode=None)
         normalize_obs = torch.compile(obs_normalizer.forward, mode=None)
@@ -906,8 +579,6 @@ def main():
         critic_obs_normalizer.load_state_dict(
             torch_checkpoint["critic_obs_normalizer_state"]
         )
-        qnet.load_state_dict(torch_checkpoint["qnet_state_dict"])
-        qnet_target.load_state_dict(torch_checkpoint["qnet_target_state_dict"])
         global_step = torch_checkpoint["global_step"]
 
         if args.use_vision:
@@ -953,6 +624,7 @@ def main():
             else:
                 explore_vision_latent = None
 
+            teacher_actions = teacher_policy(critic_obs)
             actions, explore_hidden_out = policy(
                 obs=norm_obs,
                 hidden_in=explore_hidden_in,
@@ -1001,7 +673,7 @@ def main():
         transition = TensorDict(
             {
                 "observations": obs,
-                "actions": torch.as_tensor(actions, device=device, dtype=torch.float),
+                "actions": torch.as_tensor(teacher_actions, device=device, dtype=torch.float),
                 "next": {
                     "observations": true_next_obs,
                     "rewards": torch.as_tensor(
@@ -1032,20 +704,7 @@ def main():
 
         if global_step > args.learning_starts:
             for i in range(args.num_updates):
-                logs_dict = update_main(
-                    args.num_mini_steps_critic,
-                    args.seq_len if args.use_seq_critic else 1,
-                    logs_dict,
-                )
-                if args.num_updates > 1:
-                    if i % args.policy_frequency == 1 or args.policy_frequency == 1:
-                        logs_dict = update_pol(args.num_mini_steps_actor, args.seq_len, logs_dict)
-                else:
-                    if global_step % args.policy_frequency == 0:
-                        logs_dict = update_pol(args.num_mini_steps_actor, args.seq_len, logs_dict)
-
-                soft_update(qnet, qnet_target, args.tau)
-
+                logs_dict = update_pol(args.num_mini_steps_actor, args.seq_len, logs_dict)
 
             from_module(actor).data.to_module(actor_detach)
             policy = actor_detach.explore
@@ -1055,12 +714,8 @@ def main():
                 pbar.set_description(f"{speed: 4.4f} sps, " + desc)
                 with torch.no_grad():
                     logs = {
-                        "Train/actor_loss": logs_dict["actor_loss"].mean(),
-                        "Train/qf_loss": logs_dict["qf_loss"].mean(),
-                        "Train/qf_max": logs_dict["qf_max"].mean(),
-                        "Train/qf_min": logs_dict["qf_min"].mean(),
+                        "Train/actor_bc_loss": logs_dict["actor_bc_loss"].mean(),
                         "Train/actor_grad_norm": logs_dict["actor_grad_norm"].mean(),
-                        "Train/critic_grad_norm": logs_dict["critic_grad_norm"].mean(),
                         "Train/env_rewards": rewards.mean(),
                         # "Train/buffer_rewards": raw_rewards.mean(),
                         "Train/mean_reward": episode_returns.mean(),
@@ -1130,7 +785,6 @@ def main():
                         {
                             "Misc/speed": speed,
                             "Misc/frame": global_step * args.num_envs,
-                            "Misc/critic_lr": q_scheduler.get_last_lr()[0],
                             "Misc/actor_lr": actor_scheduler.get_last_lr()[0],
                             **logs,
                         },
@@ -1146,8 +800,8 @@ def main():
                 save_params(
                     global_step,
                     actor,
-                    qnet,
-                    qnet_target,
+                    None,
+                    None,
                     obs_normalizer,
                     critic_obs_normalizer,
                     args,
@@ -1158,7 +812,6 @@ def main():
 
         global_step += 1
         actor_scheduler.step()
-        q_scheduler.step()
         pbar.update(1)
 
         explore_hidden_in = explore_hidden_out
@@ -1173,8 +826,8 @@ def main():
     save_params(
         global_step,
         actor,
-        qnet,
-        qnet_target,
+        None,
+        None,
         obs_normalizer,
         critic_obs_normalizer,
         args,

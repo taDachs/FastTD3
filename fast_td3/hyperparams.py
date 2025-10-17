@@ -141,6 +141,8 @@ class BaseArgs:
     """path to tensordict containing teacher observations"""
     use_vision: bool = False
     """if true, uses vision model"""
+    use_vision_layer_norm: bool = False
+    """if true, uses vision layernorm in vision model"""
     use_vision_augmentation: bool = False
     """if true, augments training images"""
     vision_input_width: int = 48
@@ -160,7 +162,12 @@ class BaseArgs:
     auxiliary_loss_weight: float = 0.1
     """weight for auxiliary loss"""
 
-
+    offline_mode: bool = False
+    """if set, doesn't use an online buffer and uses bc loss"""
+    bc_alpha: float = 0.1
+    """hyperparemeter for offline rl bc loss"""
+    teacher_weights: str | None = None
+    """Path to teacher weights"""
 
     seq_len: int = 50
     """sequence length for RNN"""
@@ -171,6 +178,12 @@ class BaseArgs:
     memory_hidden_dim: int = 256
     """hidden dim for GRU"""
     memory_burnin: int = 10
+    """how many samples to use to warmup memory"""
+    disable_memory: bool = False
+    """if set, disable the memory unit"""
+    cat_proprio: bool = True
+    """if set, concats vision latent with proprio for actor input, else uses vision only for memory
+    in"""
 
     num_mini_steps_critic: int = 1
     """mini steps for critic"""
@@ -185,9 +198,15 @@ class BaseArgs:
     num_critics: int = 10
     """number of critics to use for ensemble"""
 
+    eval_preset: str = "none"
+    """preset for evaluation"""
+
+    headless: bool = True
+    """if true, uses headless mode for training"""
+
 def get_args():
     """
-    Parse command-line arguments and return the appropriate Args instance based on env_name.
+    Parse command-line arguments and return the appropriate Args instance based on end_name.
     """
     # First, parse all arguments using the base Args class
     base_args = tyro.cli(BaseArgs)
@@ -613,8 +632,10 @@ class UnitreeGo2VelocityArgs(IsaacLabArgs):
 @dataclass
 class UnitreeGo2ParkourStudentArgs(IsaacLabArgs):
     env_name: str = "Unitree-Go2-Parkour-Student"
-    total_timesteps: int = 100000
+    total_timesteps: int = 25000
     eval_interval: int = 0
+
+    agent: str = "fasttd3_simbav2"
 
     use_vision: bool = True
     vision_latent_dim: int = 128
@@ -656,6 +677,8 @@ class UnitreeGo2ParkourStudentArgs(IsaacLabArgs):
     use_auxiliary_loss: bool = True
     auxiliary_loss_weight: float = 0.01
 
+    use_vision_augmentation: bool = False
+    use_ensemble_critic: bool = False
 
 @dataclass
 class UnitreeH1VelocityArgs(IsaacLabArgs):

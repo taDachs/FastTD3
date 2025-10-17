@@ -71,8 +71,9 @@ class DistributionalQNetwork(nn.Module):
         l = torch.floor(b).long()
         u = torch.ceil(b).long()
 
-        l_mask = torch.logical_and((u > 0), (l == u))
-        u_mask = torch.logical_and((l < (self.num_atoms - 1)), (l == u))
+        is_int = (l == u)
+        l_mask = is_int & (l > 0)
+        u_mask = is_int & (l == 0)
 
         l = torch.where(l_mask, l - 1, l)
         u = torch.where(u_mask, u + 1, u)
@@ -251,6 +252,7 @@ class RNNActor(nn.Module):
         use_vision_latent: bool = False,
         vision_latent_dim: bool = False,
         use_layer_norm: bool = False,
+        disable_memory: bool = False,
         device: torch.device | None = None,
     ):
         super().__init__()
@@ -267,12 +269,16 @@ class RNNActor(nn.Module):
         # memory_hidden_dim = self.n_obs
         self.memory_hidden_dim = memory_hidden_dim
         self.memory_type = memory_type
-        if self.memory_type == "gru":
-            self.memory = nn.GRU(self.n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
-        elif self.memory_type == "lstm":
-            self.memory = nn.LSTM(self.n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+        self.disable_memory = disable_memory
+        if not self.disable_memory:
+            if self.memory_type == "gru":
+                self.memory = nn.GRU(self.n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+            elif self.memory_type == "lstm":
+                self.memory = nn.LSTM(self.n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+            else:
+                raise NotImplementedError
         else:
-            raise NotImplementedError
+            memory_hidden_dim = self.n_obs
 
         if use_layer_norm:
             self.net = nn.Sequential(
@@ -330,7 +336,11 @@ class RNNActor(nn.Module):
                 obs = torch.cat((obs, vision_latent), dim=-1)
             else:
                 raise NotImplementedError
-        time_latent, hidden_out = self.memory(obs, hidden_in)
+        if self.disable_memory:
+            hidden_out = hidden_in
+            time_latent = obs
+        else:
+            time_latent, hidden_out = self.memory(obs, hidden_in)
         # hidden_out = hidden_in
         # time_latent = obs
         x = self.net(time_latent)

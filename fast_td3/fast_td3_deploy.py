@@ -134,6 +134,8 @@ def load_policy(checkpoint_path, use_memory):
         # TODO: Too hard-coded, maybe save n_obs and n_act in the checkpoint?
         if use_memory:
             n_obs = torch_checkpoint["actor_state_dict"]["memory.weight_ih_l0"].shape[-1]
+            if args["use_vision"]:
+                n_obs -= args["vision_latent_dim"]
         else:
             n_obs = (
                 torch_checkpoint["actor_state_dict"]["embedder.w.w.weight"].shape[-1] - 1

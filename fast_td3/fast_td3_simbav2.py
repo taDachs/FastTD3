@@ -290,8 +290,9 @@ class DistributionalQNetwork(nn.Module):
         l = torch.floor(b).long()
         u = torch.ceil(b).long()
 
-        l_mask = torch.logical_and((u > 0), (l == u))
-        u_mask = torch.logical_and((l < (self.num_atoms - 1)), (l == u))
+        is_int = (l == u)
+        l_mask = is_int & (l > 0)
+        u_mask = is_int & (l == 0)
 
         l = torch.where(l_mask, l - 1, l)
         u = torch.where(u_mask, u + 1, u)
@@ -504,31 +505,44 @@ class RNNActor(nn.Module):
         memory_hidden_dim: int | None = None,
         use_vision_latent: bool = False,
         vision_latent_dim: bool = False,
+        cat_proprio: bool = True,
         device: torch.device | None = None,
     ):
         super().__init__()
 
+        if memory_hidden_dim is None:
+            memory_hidden_dim = hidden_dim
+
         self.use_vision_latent = use_vision_latent
+        self.cat_proprio = cat_proprio
+
         if self.use_vision_latent:
-            n_obs += vision_latent_dim
+            if self.cat_proprio:
+                memory_in_dim = n_obs
+                embedder_in_dim = memory_hidden_dim
+                n_obs += vision_latent_dim
+            else:
+                memory_in_dim = vision_latent_dim
+                embedder_in_dim = memory_hidden_dim + n_obs
+        else:
+            memory_in_dim = n_obs
+            embedder_in_dim = memory_hidden_dim
 
         self.n_obs = n_obs
         self.n_act = n_act
 
-        if memory_hidden_dim is None:
-            memory_hidden_dim = hidden_dim
         # memory_hidden_dim = self.n_obs
         self.memory_hidden_dim = memory_hidden_dim
         self.memory_type = memory_type
         if self.memory_type == "gru":
-            self.memory = nn.GRU(self.n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+            self.memory = nn.GRU(memory_in_dim, hidden_size=memory_hidden_dim, batch_first=True, device=device)
         elif self.memory_type == "lstm":
-            self.memory = nn.LSTM(self.n_obs, hidden_size=memory_hidden_dim, batch_first=True, device=device)
+            self.memory = nn.LSTM(memory_in_dim, hidden_size=memory_hidden_dim, batch_first=True, device=device)
         else:
             raise NotImplementedError
 
         self.embedder = HyperEmbedder(
-            in_dim=memory_hidden_dim,
+            in_dim=embedder_in_dim,
             hidden_dim=hidden_dim,
             scaler_init=scaler_init,
             scaler_scale=scaler_scale,
@@ -576,13 +590,17 @@ class RNNActor(nn.Module):
     ) -> torch.Tensor:
         assert len(obs.shape) == 3
         if self.use_vision_latent:
-            if vision_latent is not None:
-                assert len(vision_latent.shape) == 3
-                obs = torch.cat((obs, vision_latent), dim=-1)
-            else:
+            if vision_latent is None:
                 raise NotImplementedError
-        time_latent, hidden_out = self.memory(obs, hidden_in)
-        x = self.embedder(time_latent)
+
+            if self.cat_proprio:
+                obs = torch.cat((obs, vision_latent), dim=-1)
+                embedder_in, hidden_out = self.memory(obs, hidden_in)
+            else:
+                memory_vision, hidden_out = self.memory(vision_latent, hidden_in)
+                embedder_in = torch.cat((obs, memory_vision), dim=-1)
+
+        x = self.embedder(embedder_in)
         x = self.encoder(x)
         x = self.predictor(x)
         return x, hidden_out
